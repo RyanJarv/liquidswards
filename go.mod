@@ -3,7 +3,7 @@ module github.com/RyanJarv/liquidswards
 go 1.17
 
 require (
-	github.com/RyanJarv/ListQueue v0.0.0-20220110014344-e84140b0c543
+	github.com/RyanJarv/lq v0.0.0-20220110015723-f2ca50734e79
 	github.com/aws/aws-sdk-go-v2 v1.11.2
 	github.com/aws/aws-sdk-go-v2/config v1.11.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.6.5

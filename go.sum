@@ -1,5 +1,5 @@
-github.com/RyanJarv/ListQueue v0.0.0-20220110014344-e84140b0c543 h1:snykeK6GmiuOSBChWGLgytVJYt1PV9Hh7O8QIhtolEU=
-github.com/RyanJarv/ListQueue v0.0.0-20220110014344-e84140b0c543/go.mod h1:6pnQ9vE8ccxaU665ocsoxL1773+CAai4enXnHwi3bM8=
+github.com/RyanJarv/lq v0.0.0-20220110015723-f2ca50734e79 h1:4mQVkX//WuVNM7/jQMz6SYaWG0BBpxuMGLKAoy51RYQ=
+github.com/RyanJarv/lq v0.0.0-20220110015723-f2ca50734e79/go.mod h1:0QlHbVOnCzEFBIt7N2OWU6+ILhWxj8N5ENSPwy2oeog=
 github.com/aws/aws-sdk-go-v2 v1.11.2 h1:SDiCYqxdIYi6HgQfAWRhgdZrdnOuGyLDJVRSWLeHWvs=
 github.com/aws/aws-sdk-go-v2 v1.11.2/go.mod h1:SQfA+m2ltnu1cA0soUkj4dRSsmITiVQUJvBIZjzfPyQ=
 github.com/aws/aws-sdk-go-v2/config v1.11.1 h1:KXSjb7ZMLRtjxClFptukTYibiOqJS9NwBO+9WD3UMto=
