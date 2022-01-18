@@ -1,60 +1,57 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/RyanJarv/lq"
+	"github.com/RyanJarv/liquidswards/lib/graph"
+	"github.com/RyanJarv/liquidswards/lib/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"io"
+	"io/ioutil"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 )
 
-type Color string
-
-const (
-	Red    Color = "\033[31m"
-	Green  Color = "\033[32m"
-	Yellow Color = "\033[33m"
-	Blue   Color = "\033[34m"
-	Purple Color = "\033[35m"
-	Cyan   Color = "\033[36m"
-	Gray   Color = "\033[37m"
-	White  Color = "\033[97m"
-)
-
-func (c Color) Color(s ...string) string {
-	return string(c) + strings.Join(s, " ") + "\033[0m"
-}
-
-type L struct {
-	Info  *log.Logger
-	Debug *log.Logger
-	Error *log.Logger
-}
-
 var (
-	region  = flag.String("region", "", "The AWS Region to use")
-	profile = flag.String("profile", "", "The AWS Profile to use")
-	debug   = flag.Bool("debug", false, "Enable debug output")
-	l       = L{
-		Info:  log.New(os.Stdout, Green.Color("[INFO] "), 0),
-		Debug: log.New(os.Stderr, Gray.Color("[DEBUG] "), 0),
-		Error: log.New(os.Stderr, Red.Color("[ERROR] "), 0),
+	region       string
+	maxPerSecond int
+	profilesStr  string
+	save         bool
+	load         bool
+	path         string
+	force        bool
+	debug        bool
+	l            = utils.L{
+		Info:  log.New(os.Stdout, utils.Green.Color("[INFO] "), 0),
+		Debug: log.New(os.Stderr, utils.Gray.Color("[DEBUG] "), 0),
+		Error: log.New(os.Stderr, utils.Red.Color("[ERROR] "), 0),
 	}
 )
 
 func main() {
+	flag.StringVar(&region, "us-east-1", "", "The AWS Region to use")
+	flag.IntVar(&maxPerSecond, "max-per-second", 0, "Maximum requests to send per second.")
+	flag.StringVar(&profilesStr, "profiles", "", "List of AWS profiles (seperated by commas) to use for discovering roles.")
+	flag.BoolVar(&save, "save", false, "Save list of roles to file specified by path, do not attempt to assume them.")
+	flag.BoolVar(&load, "load", false, "Load list of roles to file specified by path then attempt to assume them.")
+	flag.BoolVar(&force, "force", false, "Overwrite file specified by -path if it exists.")
+	flag.StringVar(&path, "path", "", "Path to use for storing the role list.")
+	flag.BoolVar(&debug, "debug", false, "Enable debug output")
 	flag.Parse()
-	inScope := flag.Args()
 
-	if !*debug {
+	l.Debug.Printf("using region %s\n", region)
+
+	if !debug {
 		null, err := os.Open(os.DevNull)
 		if err != nil {
 			l.Error.Fatalln(err)
@@ -62,287 +59,253 @@ func main() {
 		l.Debug.SetOutput(null)
 	}
 
-	l.Debug.Printf("using region %s\n", *region)
+	if len(flag.Args()) > 0 {
+		l.Error.Fatalln("extra arguments detected, did you mean to pass a comma seperated list to -profiles instead?")
+	}
 
-	err := Run(context.Background(), inScope, region, profile)
+	if (!save && !load) || (save && load) {
+		l.Error.Fatalln("must specify either (but not both) -load or -save.")
+	}
+
+	if path == "" {
+		l.Error.Fatalln("must specify a location for role arns with -path.")
+	}
+
+	ctx := context.Background()
+	cfgs, err := parseProfiles(ctx, profilesStr, maxPerSecond)
 	if err != nil {
-		l.Error.Fatalln(err)
+		log.Fatalln(err)
+	}
+
+	if save {
+		if !force {
+			if _, err := os.Stat(path); os.IsExist(err) {
+				l.Error.Fatalf("the file %s already exists, use -force to overwrite it.\n", path)
+			}
+		}
+		err := Save(ctx, cfgs, path)
+		if err != nil {
+			l.Error.Fatalln(err)
+		}
+	} else if load {
+		roles, err := Load(path)
+		if err != nil {
+			l.Error.Fatalln(err)
+		}
+
+		assume := AssumeAllRoles(ctx, roles)
+		for _, cfg := range cfgs {
+			err := assume.Run(cfg)
+			if err != nil {
+				l.Error.Fatalln(err)
+			}
+		}
+
+		assume.PrintGraph()
+
+	} else {
+		l.Error.Fatalln("something went wrong")
+	}
+
+}
+
+func parseProfiles(ctx context.Context, profiles string, second int) ([]*aws.Config, error) {
+	limiter := utils.NewSessionLimiter(second)
+
+	var ret []*aws.Config
+	for _, p := range strings.Split(profiles, ",") {
+		p = strings.Trim(p, " \t\n")
+		cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region), config.WithSharedConfigProfile(p))
+		if err != nil {
+			return nil, fmt.Errorf("failed loading profile %s using regin %s: %w", p, region, err)
+		}
+
+		limiter.Instrument(&cfg)
+
+		ret = append(ret, &cfg)
+	}
+	return ret, nil
+}
+
+func AssumeAllRoles(ctx context.Context, roles []string) *AssumeRoles {
+	return &AssumeRoles{
+		graph: graph.NewDirectedGraph[string](),
+		ctx:   ctx,
+		roles: roles,
 	}
 }
 
-func Run(ctx context.Context, scope []string, region *string, profile *string) error {
-	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(*region), config.WithSharedConfigProfile(*profile))
+type AssumeRoles struct {
+	graph *graph.Graph[string]
+	ctx   context.Context
+	roles []string
+}
+
+func (a *AssumeRoles) Run(cfg *aws.Config) error {
+	resp, err := sts.NewFromConfig(*cfg).GetCallerIdentity(a.ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
-		return fmt.Errorf("failed loading profile %s using regin %s: %w", *profile, *region, err)
+		return fmt.Errorf("calling sts get-caller-identity failed: %w", err)
 	}
-
-	roles := NewRoles(ctx)
-	roles.Run(&cfg)
-	roles.q.Wait()
-
-	roles.PrintGraph()
-
+	a.assumeRoles(cfg, []string{utils.CleanArn(*resp.Arn)})
 	return nil
 }
 
-func NewVertex[T comparable](key T) *Vertex[T] {
-	return &Vertex[T]{
-		Key:   key,
-		Nodes: map[T]*Vertex[T]{},
-	}
-}
-
-type Vertex[T comparable] struct {
-	// Key is the unique identifier of the vertex
-	Key T
-	// Nodes will describe vertices connected to this one The key will be the Key value of the connected
-	// vertice with the value being the pointer to it
-	Nodes map[T]*Vertex[T]
-}
-
-func NewDirectedGraph[T comparable]() *Graph[T] {
-	return &Graph[T]{Nodes: map[T]*Vertex[T]{}}
-}
-
-type Graph[T comparable] struct {
-	// Nodes describes all vertices contained in the graph The key will be the Key value of the connected
-	// vertice with the value being the pointer to it
-	Nodes map[T]*Vertex[T]
-}
-
-// AddNode creates a new vertex with the given key if it doesn't already exist and adds it to the graph
-func (g *Graph[T]) AddNode(key T) {
-	if _, ok := g.Nodes[key]; ok {
-		return
-	}
-	v := NewVertex(key)
-	g.Nodes[key] = v
-}
-
-// The AddEdge method adds an edge between two vertices in the graph
-func (g *Graph[T]) AddEdge(k1, k2 T) {
-	v1 := g.Nodes[k1]
-	v2 := g.Nodes[k2]
-
-	// return an error if one of the vertices doesn't exist
-	if v1 == nil || v2 == nil {
-		l.Error.Fatalln("not all vertices exist")
-	}
-
-	// do nothing if the vertices are already connected
-	if _, ok := v1.Nodes[v2.Key]; ok {
+func (a *AssumeRoles) assumeRoles(cfg *aws.Config, identity []string) {
+	l.Debug.Printf("running assumeRoles on %s", strings.Join(identity, " -> "))
+	currArn := identity[len(identity)-1]
+	if len(identity) == 60 {
+		l.Info.Printf("max depth of 50 reached when enumerating %s\n", currArn)
 		return
 	}
 
-	v1.Nodes[v2.Key] = v2
-
-	// Add the vertices to the graph's vertex map
-	g.Nodes[v1.Key] = v1
-	g.Nodes[v2.Key] = v2
-}
-
-// here, we import the graph we defined in the previous section as the `graph` package
-func DFS[T comparable](g *Graph[T], startNode *Vertex[T], visited *map[T]bool, depth int, visitCb func(T, int)) {
-	// we maintain a map of visited nodes to prevent visiting the same node more than once
-	if visited == nil {
-		visited = &map[T]bool{}
-	}
-
-	if startNode == nil {
-		return
-	}
-	//visited[startNode.Key] = true
-	visitCb(startNode.Key, depth)
-
-	depth += 1
-	// for each of the adjacent vertices, call the function recursively if it hasn't yet been visited
-	for _, v := range startNode.Nodes {
-		if (*visited)[v.Key] {
+	svc := sts.NewFromConfig(*cfg)
+	for _, role := range a.roles {
+		if utils.VisitedRole(identity, role) {
 			continue
 		}
-		DFS[T](g, v, visited, depth, visitCb)
-	}
-}
+		_, err := svc.AssumeRole(a.ctx, &sts.AssumeRoleInput{
+			RoleArn:         aws.String(role),
+			RoleSessionName: aws.String("rhino-assumerole-mapping"),
+			DurationSeconds: aws.Int32(900),
+			ExternalId:      nil, // TODO: pass external ID along with role ARN
+		})
 
-//func NewRoleGraph() {
-//	RoleGraph{
-//		graph: graph.New(math.MaxInt),
-//	}
-//}
-//
-//type RoleGraph struct {
-//	nodes []*string
-//	edges map[string][]*string
-//	lock  sync.RWMutex
-//	graph *graph.Mutable
-//}
-//
-//// AddNode adds a node to the graph
-//func (g *RoleGraph) AddNode(n *string) {
-//	g.lock.Lock()
-//	g.nodes = append(g.nodes, n)
-//	g.lock.Unlock()
-//}
-//
-//func (g *RoleGraph) GetNode(n string) *string {
-//	for _, v := range g.nodes {
-//		if n == *v {
-//			return v
-//		}
-//	}
-//	return nil
-//}
-//
-//// AddEdge adds an edge to the graph
-//func (g *RoleGraph) AddEdge(n1, n2 *string) {
-//	g.lock.Lock()
-//	if g.edges == nil {
-//		g.edges = make(map[string][]*string)
-//	}
-//	g.edges[*n1] = append(g.edges[*n1], n2)
-//	g.lock.Unlock()
-//}
-//
-//// AddEdge adds an edge to the graph
-//func (g *RoleGraph) Print() {
-//	g.lock.RLock()
-//	for _, v := range g.nodes {
-//		curr := []string{*v}
-//		i := 0
-//		for down := g.edges[curr[len(curr)]]; len(down) > 0 {
-//			curr = append(curr, *g.edges[curr][0])
-//		}
-//		for _, j := range g.edges[*v] {
-//			fmt.Printf("\n%s -> \n", v)
-//		}
-//	}
-//	g.lock.RUnlock()
-//}
-//
-//func (g *RoleGraph) nearNode() {
-//	return g.edges[n]
-//}
-
-//func EnumerateRoles(ctx context.Context, cfg *aws.Config, scope []string) *sync.WaitGroup {
-//	return nil
-//}
-//
-func NewRoles(ctx context.Context) *Roles {
-	return &Roles{
-		q:   lq.NewListQueue[types.Role](),
-		ctx: ctx,
-	}
-}
-
-type Roles struct {
-	q          *lq.ListQueue[types.Role]
-	ctx        context.Context
-	discovered *Graph[string]
-	accessed   *Graph[string]
-}
-
-func (r *Roles) Run(cfg *aws.Config) {
-	r.discovered = NewDirectedGraph[string]()
-	r.accessed = NewDirectedGraph[string]()
-
-	r.run(cfg, nil)
-}
-
-func (r *Roles) run(cfg *aws.Config, prevIdentity *string) {
-	svc := sts.NewFromConfig(*cfg)
-	resp, err := svc.GetCallerIdentity(r.ctx, &sts.GetCallerIdentityInput{})
-	if err != nil {
-		l.Error.Fatalln(err)
-	}
-
-	currArn := CleanArn(*resp.Arn)
-
-	r.accessed.AddNode(currArn)
-	r.discovered.AddNode(currArn)
-
-	if prevIdentity != nil {
-		r.accessed.AddEdge(*prevIdentity, currArn)
-	}
-
-	r.asssumeAllRoles(cfg, currArn)
-	r.listRoles(cfg, currArn)
-}
-
-func CleanArn(arn string) string {
-	if strings.Contains(arn, "assumed-role") {
-		parts := strings.Split(arn, "/")
-		parts[2] = "role"
-		arn = strings.Join(parts[0:len(parts)-1], "/")
-	}
-	return arn
-}
-
-func (r *Roles) asssumeAllRoles(cfg *aws.Config, identity string) {
-	svc := sts.NewFromConfig(*cfg)
-	roleCh := r.q.Each()
-
-	go func() {
-		for role := range roleCh {
-			l.Debug.Printf("attempting to assume role %s\n", role)
-			// TODO: If this succeeds it ends up calling sts:AssumeRole twice as much as necessary.
-			_, err := svc.AssumeRole(r.ctx, &sts.AssumeRoleInput{
-				RoleArn:         role.Arn,
-				RoleSessionName: aws.String("liquidswards-assumerole-test"),
-				DurationSeconds: aws.Int32(900),
-				ExternalId:      nil, // TODO: pass external ID along with role ARN
-			})
-
-			if err != nil {
-				l.Debug.Println(err.Error())
-			} else {
-				l.Info.Printf("%s "+Cyan.Color("--assumed role--> ")+" %s", identity, *role.Arn)
-
-				newCfg := *cfg
-				newCfg.Credentials = stscreds.NewAssumeRoleProvider(sts.NewFromConfig(*cfg), *role.Arn)
-				r.run(&newCfg, &identity)
-			}
-			r.q.Done()
+		if err != nil {
+			l.Debug.Println(err.Error())
+			continue
 		}
-	}()
+		a.graph.AddNode(role)
+		a.graph.AddEdge(currArn, role, aws.Bool(true), nil)
+		l.Info.Printf("%s "+utils.Cyan.Color("--assumed role--> ")+" %s", identity, role)
+
+		newCfg := *cfg
+		newCfg.Credentials = stscreds.NewAssumeRoleProvider(sts.NewFromConfig(*cfg), role)
+
+		go a.assumeRoles(&newCfg, append(identity, role))
+	}
 }
 
-func (r *Roles) listRoles(cfg *aws.Config, identity string) {
+func (a *AssumeRoles) PrintGraph() {
+	fmt.Println(utils.Green.Color("\nAccessed:"))
+	for _, start := range a.graph.Nodes {
+		if len(start.Edges) == 0 {
+			continue
+		}
+
+		graph.DFS[string](a.graph, start, func(e *graph.Edge[string]) bool {
+			return e.Accessed != nil && *e.Accessed
+		}, nil, []string{}, func(node string, path []string) {
+			fmt.Printf("\n")
+			for i := 0; i < len(path); i++ {
+				fmt.Printf("\t")
+			}
+			if len(path) == 0 {
+				fmt.Printf(" "+utils.Cyan.Color("*")+" %s", node)
+			} else {
+				fmt.Printf(utils.Cyan.Color("->")+" %s", node)
+			}
+		})
+	}
+	fmt.Printf("\n")
+}
+
+func Load(path string) ([]string, error) {
+	text, err := ioutil.ReadFile(path)
+	if err != nil {
+		return []string{}, fmt.Errorf("failed to open file %s: %w", path, err)
+	}
+	text = bytes.Trim(text, "\n")
+
+	return strings.Split(string(text), "\n"), nil
+}
+
+// AssumeRolePolicyDocument
+//
+// 	Example Json:
+//			  {
+//                "Version": "2012-10-17",
+//                "Statement": [
+//                    {
+//                        "Effect": "Allow",
+//                        "Principal": {
+//                            "Service": "ssm.amazonaws.com"
+//                        },
+//                        "Action": "sts:AssumeRole"
+//                    }
+//                ]
+//            },
+//
+type AssumeRolePolicyDocument struct {
+	Version   string `json:"Version"`
+	Statement []struct {
+		Effect    string `json:"Effect"`
+		Principal struct {
+			Service   *string `json:"Service"`
+			Aws       *string `json:"Aws"`
+			Federated *string `json:"Federated"`
+		} `json:"Principal"`
+	} `json:"Statement"`
+}
+
+func filter(role types.Role) bool {
+	policyDoc := AssumeRolePolicyDocument{}
+	policyStr, err := url.QueryUnescape(*role.AssumeRolePolicyDocument)
+	if err != nil {
+		l.Error.Printf("could not unescape trust policy: %s\n", err)
+		return true
+	}
+	err = json.Unmarshal([]byte(policyStr), &policyDoc)
+	if err != nil {
+		l.Info.Printf("failed to unmarshal role %s\n", *role.Arn)
+		l.Debug.Printf("role trust policy: %s\n", policyStr)
+		return true
+	}
+
+	for _, s := range policyDoc.Statement {
+		if s.Principal.Aws != nil || s.Principal.Federated != nil {
+			return true
+		}
+	}
+	l.Info.Printf("skipping role %s because it does not match the filter function\n", *role.Arn)
+	l.Info.Printf("trust policy is %s\n", policyStr)
+	return false
+}
+
+func Save(ctx context.Context, cfgs []*aws.Config, path string) error {
+	file, err := os.Create(path)
+	defer file.Close()
+	if err != nil {
+		return fmt.Errorf("failed to create file at %s", path)
+	}
+	for _, cfg := range cfgs {
+		err := WriteRolesToFile(ctx, cfg, file, filter)
+		if err != nil {
+			return fmt.Errorf("failed writing to %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func WriteRolesToFile(ctx context.Context, cfg *aws.Config, out io.Writer, filter func(types.Role) bool) error {
 	svc := iam.NewFromConfig(*cfg)
 
 	resp := &iam.ListRolesOutput{IsTruncated: true}
 
 	var err error
 	for err == nil && resp.IsTruncated {
-		resp, err = svc.ListRoles(r.ctx, &iam.ListRolesInput{})
+		resp, err = svc.ListRoles(ctx, &iam.ListRolesInput{Marker: resp.Marker})
 		if err != nil {
-			l.Debug.Println(err)
-		} else {
-			for _, v := range resp.Roles {
-				l.Debug.Printf("%s found role %s\n", identity, *v.Arn)
-				r.discovered.AddNode(*v.Arn)
-				r.discovered.AddEdge(identity, *v.Arn)
+			return fmt.Errorf("failed listing roles: %w", err)
+		}
+		for _, role := range resp.Roles {
+			if !filter(role) {
+				continue
 			}
-			r.q.Add(resp.Roles...)
+			_, err := io.WriteString(out, fmt.Sprintln(*role.Arn))
+			if err != nil {
+				return fmt.Errorf("failed writing role arn to output: %w", err)
+			}
 		}
 	}
-}
-
-func (r *Roles) PrintGraph() {
-	fmt.Println(Green.Color("\nAccessed:"))
-	for _, start := range r.accessed.Nodes {
-		if len(start.Nodes) > 0 {
-			DFS[string](r.accessed, start, nil, 0, func(node string, depth int) {
-				fmt.Printf("\n")
-				for i := 0; i < depth; i++ {
-					fmt.Printf("\t")
-				}
-				if depth == 0 {
-					fmt.Printf(" "+Cyan.Color("*")+" %s", node)
-				} else {
-					fmt.Printf(Cyan.Color("->")+" %s", node)
-				}
-			})
-		}
-	}
-	fmt.Printf("\n")
+	return nil
 }
