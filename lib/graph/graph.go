@@ -176,10 +176,17 @@ func (g *Graph[T]) HasEdge(k1, k2 T) bool {
 }
 
 // here, we import the graph we defined in the previous section as the `graph` package
-func DFS[T comparable](g *Graph[T], startNode *Node[T], accept func(*Edge[T]) bool, visited *map[T]bool, path []T, visitCb func(T, []T)) {
+func DFS[T comparable](g *Graph[T], startNode *Node[T], accept func(*Edge[T]) bool, visited map[T]bool, path []T, visitCb func(T, []T)) {
+	newVisited := make(map[T]bool)
 	// we maintain a map of visited nodes to prevent visiting the same node more than once
-	if visited == nil {
-		visited = &map[T]bool{}
+	if visited != nil {
+		// Create new map so we don't mess with the parents copy
+		newVisited = make(map[T]bool)
+
+		// Copy from the original map to the target map
+		for key, value := range visited {
+			newVisited[key] = value
+		}
 	}
 
 	// Build path to current node
@@ -193,18 +200,19 @@ func DFS[T comparable](g *Graph[T], startNode *Node[T], accept func(*Edge[T]) bo
 		return
 	}
 
-	(*visited)[startNode.Key] = true
+	newVisited[startNode.Key] = true
 	visitCb(startNode.Key, path)
 
 	// for each of the adjacent vertices, call the function recursively if it hasn't yet been visited
 	for _, v := range startNode.Edges {
-		if (*visited)[v.Node.Key] {
-			continue
-		}
 		if !accept(v) {
 			continue
 		}
 
-		DFS[T](g, v.Node, accept, visited, path, visitCb)
+		if newVisited[v.Node.Key] {
+			continue
+		}
+
+		DFS[T](g, v.Node, accept, newVisited, path, visitCb)
 	}
 }

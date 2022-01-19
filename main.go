@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 )
 
 var (
@@ -49,14 +50,16 @@ func main() {
 	flag.BoolVar(&debug, "debug", false, "Enable debug output")
 	flag.Parse()
 
-	l.Debug.Printf("using region %s\n", region)
-
 	if !debug {
 		null, err := os.Open(os.DevNull)
 		if err != nil {
 			l.Error.Fatalln(err)
 		}
 		l.Debug.SetOutput(null)
+	}
+
+	if region != "" {
+		l.Debug.Printf("using region %s\n", region)
 	}
 
 	if len(flag.Args()) > 0 {
@@ -101,7 +104,7 @@ func main() {
 			}
 		}
 
-		assume.PrintGraph()
+		assume.PrintGraph(cfgs)
 
 	} else {
 		l.Error.Fatalln("something went wrong")
@@ -132,6 +135,7 @@ func AssumeAllRoles(ctx context.Context, roles []string) *AssumeRoles {
 		graph: graph.NewDirectedGraph[string](),
 		ctx:   ctx,
 		roles: roles,
+		wg:    &sync.WaitGroup{},
 	}
 }
 
@@ -139,6 +143,7 @@ type AssumeRoles struct {
 	graph *graph.Graph[string]
 	ctx   context.Context
 	roles []string
+	wg    *sync.WaitGroup
 }
 
 func (a *AssumeRoles) Run(cfg *aws.Config) error {
@@ -146,7 +151,10 @@ func (a *AssumeRoles) Run(cfg *aws.Config) error {
 	if err != nil {
 		return fmt.Errorf("calling sts get-caller-identity failed: %w", err)
 	}
+
+	a.wg.Add(1)
 	a.assumeRoles(cfg, []string{utils.CleanArn(*resp.Arn)})
+	a.wg.Wait()
 	return nil
 }
 
@@ -160,9 +168,6 @@ func (a *AssumeRoles) assumeRoles(cfg *aws.Config, identity []string) {
 
 	svc := sts.NewFromConfig(*cfg)
 	for _, role := range a.roles {
-		if utils.VisitedRole(identity, role) {
-			continue
-		}
 		_, err := svc.AssumeRole(a.ctx, &sts.AssumeRoleInput{
 			RoleArn:         aws.String(role),
 			RoleSessionName: aws.String("rhino-assumerole-mapping"),
@@ -174,22 +179,38 @@ func (a *AssumeRoles) assumeRoles(cfg *aws.Config, identity []string) {
 			l.Debug.Println(err.Error())
 			continue
 		}
-		a.graph.AddNode(role)
+		newNode := a.graph.AddNode(role)
+
 		a.graph.AddEdge(currArn, role, aws.Bool(true), nil)
-		l.Info.Printf("%s "+utils.Cyan.Color("--assumed role--> ")+" %s", identity, role)
+		arrow := utils.Cyan.Color(" --assumes--> ")
+		l.Info.Printf("%s"+arrow+"%s", strings.Join(identity, arrow), role)
+
+		if utils.VisitedRole(identity[:len(identity)-1], role) {
+			continue
+		}
 
 		newCfg := *cfg
 		newCfg.Credentials = stscreds.NewAssumeRoleProvider(sts.NewFromConfig(*cfg), role)
 
-		go a.assumeRoles(&newCfg, append(identity, role))
+		if newNode {
+			a.wg.Add(1)
+			go a.assumeRoles(&newCfg, append(identity, role))
+		}
 	}
+	a.wg.Done()
 }
 
-func (a *AssumeRoles) PrintGraph() {
+func (a *AssumeRoles) PrintGraph(cfgs []*aws.Config) error {
 	fmt.Println(utils.Green.Color("\nAccessed:"))
-	for _, start := range a.graph.Nodes {
-		if len(start.Edges) == 0 {
-			continue
+	for _, cfg := range cfgs {
+		resp, err := sts.NewFromConfig(*cfg).GetCallerIdentity(a.ctx, &sts.GetCallerIdentityInput{})
+		if err != nil {
+			return err
+		}
+
+		start, err := a.graph.GetNode(utils.CleanArn(*resp.Arn))
+		if err != nil {
+			return err
 		}
 
 		graph.DFS[string](a.graph, start, func(e *graph.Edge[string]) bool {
@@ -207,6 +228,7 @@ func (a *AssumeRoles) PrintGraph() {
 		})
 	}
 	fmt.Printf("\n")
+	return nil
 }
 
 func Load(path string) ([]string, error) {
@@ -256,7 +278,7 @@ func filter(role types.Role) bool {
 	}
 	err = json.Unmarshal([]byte(policyStr), &policyDoc)
 	if err != nil {
-		l.Info.Printf("failed to unmarshal role %s\n", *role.Arn)
+		l.Error.Printf("failed to unmarshal role %s\n", *role.Arn)
 		l.Debug.Printf("role trust policy: %s\n", policyStr)
 		return true
 	}
@@ -266,8 +288,8 @@ func filter(role types.Role) bool {
 			return true
 		}
 	}
-	l.Info.Printf("skipping role %s because it does not match the filter function\n", *role.Arn)
-	l.Info.Printf("trust policy is %s\n", policyStr)
+	l.Debug.Printf("skipping role %s because it does not match the filter function\n", *role.Arn)
+	l.Debug.Printf("trust policy is %s\n", policyStr)
 	return false
 }
 
