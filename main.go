@@ -130,7 +130,7 @@ func parseProfiles(ctx context.Context, profiles string, second int) ([]*aws.Con
 	return ret, nil
 }
 
-func AssumeAllRoles(ctx context.Context, roles []string) *AssumeRoles {
+func AssumeAllRoles(ctx context.Context, roles []Role) *AssumeRoles {
 	return &AssumeRoles{
 		graph: graph.NewDirectedGraph[string](),
 		ctx:   ctx,
@@ -142,7 +142,7 @@ func AssumeAllRoles(ctx context.Context, roles []string) *AssumeRoles {
 type AssumeRoles struct {
 	graph *graph.Graph[string]
 	ctx   context.Context
-	roles []string
+	roles []Role
 	wg    *sync.WaitGroup
 }
 
@@ -168,33 +168,55 @@ func (a *AssumeRoles) assumeRoles(cfg *aws.Config, identity []string) {
 
 	svc := sts.NewFromConfig(*cfg)
 	for _, role := range a.roles {
-		_, err := svc.AssumeRole(a.ctx, &sts.AssumeRoleInput{
-			RoleArn:         aws.String(role),
-			RoleSessionName: aws.String("rhino-assumerole-mapping"),
-			DurationSeconds: aws.Int32(900),
-			ExternalId:      nil, // TODO: pass external ID along with role ARN
-		})
+		externalIds := []*string{}
+		switch role.ExternalId.(type) {
+		case string:
+			externalIds = append(externalIds, aws.String(role.ExternalId.(string)))
+		case []string:
+			for _, id := range role.ExternalId.([]string) {
+				externalIds = append(externalIds, &id)
+			}
+		case nil:
+			externalIds = append(externalIds, nil)
+		}
+
+		var externalId *string
+		var err error
+		for _, extId := range externalIds {
+			_, err = svc.AssumeRole(a.ctx, &sts.AssumeRoleInput{
+				RoleArn:         aws.String(role.Arn),
+				RoleSessionName: aws.String("rhino-assumerole-mapping"),
+				DurationSeconds: aws.Int32(900),
+				ExternalId:      extId,
+			})
+			if err != nil {
+				externalId = extId
+				break
+			}
+		}
 
 		if err != nil {
 			l.Debug.Println(err.Error())
 			continue
 		}
-		newNode := a.graph.AddNode(role)
+		newNode := a.graph.AddNode(role.Arn)
 
-		a.graph.AddEdge(currArn, role, aws.Bool(true), nil)
+		a.graph.AddEdge(currArn, role.Arn, aws.Bool(true), nil)
 		arrow := utils.Cyan.Color(" --assumes--> ")
-		l.Info.Printf("%s"+arrow+"%s", strings.Join(identity, arrow), role)
+		l.Info.Printf("%s"+arrow+"%s", strings.Join(identity, arrow), role.Arn)
 
-		if utils.VisitedRole(identity[:len(identity)-1], role) {
+		if utils.VisitedRole(identity[:len(identity)-1], role.Arn) {
 			continue
 		}
 
 		newCfg := *cfg
-		newCfg.Credentials = stscreds.NewAssumeRoleProvider(sts.NewFromConfig(*cfg), role)
+		newCfg.Credentials = stscreds.NewAssumeRoleProvider(sts.NewFromConfig(*cfg), role.Arn, func(opts *stscreds.AssumeRoleOptions) {
+			opts.ExternalID = externalId
+		})
 
 		if newNode {
 			a.wg.Add(1)
-			go a.assumeRoles(&newCfg, append(identity, role))
+			go a.assumeRoles(&newCfg, append(identity, role.Arn))
 		}
 	}
 	a.wg.Done()
@@ -231,14 +253,23 @@ func (a *AssumeRoles) PrintGraph(cfgs []*aws.Config) error {
 	return nil
 }
 
-func Load(path string) ([]string, error) {
+func Load(path string) ([]Role, error) {
 	text, err := ioutil.ReadFile(path)
 	if err != nil {
-		return []string{}, fmt.Errorf("failed to open file %s: %w", path, err)
+		return nil, fmt.Errorf("failed to open file %s: %w", path, err)
 	}
 	text = bytes.Trim(text, "\n")
 
-	return strings.Split(string(text), "\n"), nil
+	roles := []Role{}
+	for _, line := range strings.Split(string(text), "\n") {
+		var role Role
+		err := json.Unmarshal([]byte(line), &role)
+		if err != nil {
+			return nil, err
+		}
+		roles = append(roles, role)
+	}
+	return roles, nil
 }
 
 // AssumeRolePolicyDocument
@@ -253,6 +284,11 @@ func Load(path string) ([]string, error) {
 //                            "Service": "ssm.amazonaws.com"
 //                        },
 //                        "Action": "sts:AssumeRole"
+//						  "Condition": {
+//							  "StringEquals": {
+//								  "sts:ExternalId":"asdf"
+//						      }
+//					      }
 //                    }
 //                ]
 //            },
@@ -262,35 +298,45 @@ type AssumeRolePolicyDocument struct {
 	Statement []struct {
 		Effect    string `json:"Effect"`
 		Principal struct {
-			Service   *string `json:"Service"`
-			Aws       *string `json:"Aws"`
-			Federated *string `json:"Federated"`
+			Service   interface{} `json:"Service"`
+			Aws       interface{} `json:"Aws"`
+			Federated interface{} `json:"Federated"`
 		} `json:"Principal"`
+		Condition struct {
+			StringEquals struct {
+				ExternalId interface{} `json:"sts:ExternalId,omitempty"`
+			} `json:"StringEquals"`
+		} `json:"Condition"`
 	} `json:"Statement"`
 }
 
-func filter(role types.Role) bool {
+type Role struct {
+	Arn        string
+	ExternalId interface{}
+}
+
+func filterMap(role types.Role) interface{} {
 	policyDoc := AssumeRolePolicyDocument{}
 	policyStr, err := url.QueryUnescape(*role.AssumeRolePolicyDocument)
 	if err != nil {
 		l.Error.Printf("could not unescape trust policy: %s\n", err)
-		return true
+		return Role{Arn: *role.Arn}
 	}
 	err = json.Unmarshal([]byte(policyStr), &policyDoc)
 	if err != nil {
 		l.Error.Printf("failed to unmarshal role %s\n", *role.Arn)
 		l.Debug.Printf("role trust policy: %s\n", policyStr)
-		return true
+		return Role{Arn: *role.Arn}
 	}
 
 	for _, s := range policyDoc.Statement {
 		if s.Principal.Aws != nil || s.Principal.Federated != nil {
-			return true
+			return Role{Arn: *role.Arn, ExternalId: s.Condition.StringEquals.ExternalId}
 		}
 	}
 	l.Debug.Printf("skipping role %s because it does not match the filter function\n", *role.Arn)
 	l.Debug.Printf("trust policy is %s\n", policyStr)
-	return false
+	return nil
 }
 
 func Save(ctx context.Context, cfgs []*aws.Config, path string) error {
@@ -300,7 +346,7 @@ func Save(ctx context.Context, cfgs []*aws.Config, path string) error {
 		return fmt.Errorf("failed to create file at %s", path)
 	}
 	for _, cfg := range cfgs {
-		err := WriteRolesToFile(ctx, cfg, file, filter)
+		err := WriteRolesToFile(ctx, cfg, file, filterMap)
 		if err != nil {
 			return fmt.Errorf("failed writing to %s: %w", path, err)
 		}
@@ -308,7 +354,7 @@ func Save(ctx context.Context, cfgs []*aws.Config, path string) error {
 	return nil
 }
 
-func WriteRolesToFile(ctx context.Context, cfg *aws.Config, out io.Writer, filter func(types.Role) bool) error {
+func WriteRolesToFile(ctx context.Context, cfg *aws.Config, out io.Writer, filterMap func(types.Role) interface{}) error {
 	svc := iam.NewFromConfig(*cfg)
 
 	resp := &iam.ListRolesOutput{IsTruncated: true}
@@ -320,10 +366,16 @@ func WriteRolesToFile(ctx context.Context, cfg *aws.Config, out io.Writer, filte
 			return fmt.Errorf("failed listing roles: %w", err)
 		}
 		for _, role := range resp.Roles {
-			if !filter(role) {
+			result := filterMap(role)
+			if result == nil {
 				continue
 			}
-			_, err := io.WriteString(out, fmt.Sprintln(*role.Arn))
+			text, err := json.Marshal(result)
+			if err != nil {
+				return err
+			}
+
+			_, err = io.WriteString(out, fmt.Sprintln(string(text)))
 			if err != nil {
 				return fmt.Errorf("failed writing role arn to output: %w", err)
 			}
