@@ -16,7 +16,7 @@ func NewNode[T comparable](key T) *Node[T] {
 }
 
 type Edge[T comparable] struct {
-	Node *Node[T]
+	Node T
 
 	// Accessed indicates if this edge represents successful access or not. This is useful to avoid retrying failed
 	// access attempts.
@@ -107,7 +107,7 @@ func (g *Graph[T]) AddEdge(k1, k2 T, accessed *bool, discovered *bool) {
 	}
 
 	edge := &Edge[T]{
-		Node: v2,
+		Node: v2.Key,
 		m:    &sync.Mutex{},
 	}
 
@@ -168,7 +168,7 @@ func (g *Graph[T]) HasEdge(k1, k2 T) bool {
 	v1.m.Lock()
 	defer v1.m.Unlock()
 	for _, edge := range v1.Edges {
-		if edge.Node.Key == v2.Key {
+		if edge.Node == v2.Key {
 			return true
 		}
 	}
@@ -176,43 +176,44 @@ func (g *Graph[T]) HasEdge(k1, k2 T) bool {
 }
 
 // here, we import the graph we defined in the previous section as the `graph` package
-func DFS[T comparable](g *Graph[T], startNode *Node[T], accept func(*Edge[T]) bool, visited map[T]bool, path []T, visitCb func(T, []T)) {
-	newVisited := make(map[T]bool)
-	// we maintain a map of visited nodes to prevent visiting the same node more than once
-	if visited != nil {
-		// Create new map so we don't mess with the parents copy
-		newVisited = make(map[T]bool)
-
-		// Copy from the original map to the target map
-		for key, value := range visited {
-			newVisited[key] = value
-		}
-	}
-
-	// Build path to current node
-	if len(path) == 0 {
-		path = []T{startNode.Key}
-	} else {
-		path = append(path, startNode.Key)
-	}
-
+func DFS[T comparable](g *Graph[T], startNode *T, accept func(*Edge[T]) bool, visited map[T]bool, path []T, visitCb func(T, []T), last bool) {
 	if startNode == nil {
 		return
 	}
 
-	newVisited[startNode.Key] = true
-	visitCb(startNode.Key, path)
+	newVisited := make(map[T]bool)
+	// we maintain a map of visited nodes to prevent visiting the same node more than once
+	if visited != nil {
+		newVisited = visited
+	}
+
+	// Build path to current node
+	if len(path) == 0 {
+		path = []T{*startNode}
+	} else {
+		path = append(path, *startNode)
+	}
+
+	newVisited[*startNode] = true
+	visitCb(*startNode, path)
 
 	// for each of the adjacent vertices, call the function recursively if it hasn't yet been visited
-	for _, v := range startNode.Edges {
+	node, err := g.GetNode(*startNode)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	for _, v := range node.Edges {
 		if !accept(v) {
 			continue
 		}
 
-		if newVisited[v.Node.Key] {
+		if last {
 			continue
+		} else if newVisited[v.Node] {
+			DFS[T](g, &v.Node, accept, newVisited, path, visitCb, true)
+		} else {
+			DFS[T](g, &v.Node, accept, newVisited, path, visitCb, false)
 		}
-
-		DFS[T](g, v.Node, accept, newVisited, path, visitCb)
 	}
 }

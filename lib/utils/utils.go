@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/smithy-go/middleware"
 	"go.uber.org/ratelimit"
@@ -53,8 +54,11 @@ func VisitedRole(identity []string, role string) bool {
 func CleanArn(arn string) string {
 	if strings.Contains(arn, "assumed-role") {
 		parts := strings.Split(arn, "/")
-		parts[2] = "role"
+		parts2 := strings.Split(parts[0], ":")
+		parts2[len(parts2)-1] = "role"
+		parts[0] = strings.Join(parts2, ":")
 		arn = strings.Join(parts[0:len(parts)-1], "/")
+		fmt.Println(parts)
 	}
 	return arn
 }

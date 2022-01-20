@@ -14,22 +14,32 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/goccy/go-graphviz"
+	"github.com/goccy/go-graphviz/cgraph"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 )
+
+const colorScheme = "pastel28"
 
 var (
 	region       string
 	maxPerSecond int
 	profilesStr  string
+	find         bool
+	outputPath   string
+	scan         bool
 	save         bool
 	load         bool
-	path         string
 	force        bool
 	debug        bool
 	l            = utils.L{
@@ -43,10 +53,12 @@ func main() {
 	flag.StringVar(&region, "us-east-1", "", "The AWS Region to use")
 	flag.IntVar(&maxPerSecond, "max-per-second", 0, "Maximum requests to send per second.")
 	flag.StringVar(&profilesStr, "profiles", "", "List of AWS profiles (seperated by commas) to use for discovering roles.")
-	flag.BoolVar(&save, "save", false, "Save list of roles to file specified by path, do not attempt to assume them.")
-	flag.BoolVar(&load, "load", false, "Load list of roles to file specified by path then attempt to assume them.")
-	flag.BoolVar(&force, "force", false, "Overwrite file specified by -path if it exists.")
-	flag.StringVar(&path, "path", "", "Path to use for storing the role list.")
+	flag.BoolVar(&find, "find", false, "Save graph of assumed roles to the file specified.")
+	flag.BoolVar(&scan, "scan", false, "Load list of assumed roles from the file specified then print the graph.")
+	flag.BoolVar(&save, "save", false, "Save list of roles to file specified by outputPath, do not attempt to assume them.")
+	flag.BoolVar(&load, "load", false, "Load list of roles to file specified by outputPath then attempt to assume them.")
+	flag.StringVar(&outputPath, "path", "", "Prefix to use when saving files.")
+	flag.BoolVar(&force, "force", false, "Overwrite file specified by -outputPath if it exists.")
 	flag.BoolVar(&debug, "debug", false, "Enable debug output")
 	flag.Parse()
 
@@ -66,37 +78,48 @@ func main() {
 		l.Error.Fatalln("extra arguments detected, did you mean to pass a comma seperated list to -profiles instead?")
 	}
 
-	if (!save && !load) || (save && load) {
-		l.Error.Fatalln("must specify either (but not both) -load or -save.")
-	}
-
-	if path == "" {
-		l.Error.Fatalln("must specify a location for role arns with -path.")
-	}
-
 	ctx := context.Background()
 	cfgs, err := parseProfiles(ctx, profilesStr, maxPerSecond)
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	if save {
+	outputPath, err = expandPath(outputPath)
+	if err != nil {
+		l.Error.Fatalln("failed to expand path: %w", err)
+	}
+
+	rolesPath := outputPath + ".roles.json"
+
+	roles := []Role{}
+	if find {
 		if !force {
-			if _, err := os.Stat(path); os.IsExist(err) {
-				l.Error.Fatalf("the file %s already exists, use -force to overwrite it.\n", path)
+			if _, err := os.Stat(rolesPath); os.IsExist(err) {
+				l.Error.Fatalf("the file %s already exists, use -force to overwrite it.\n", find)
 			}
 		}
-		err := Save(ctx, cfgs, path)
+		err := Save(ctx, cfgs, rolesPath)
 		if err != nil {
 			l.Error.Fatalln(err)
 		}
-	} else if load {
-		roles, err := Load(path)
-		if err != nil {
-			l.Error.Fatalln(err)
-		}
+	}
 
-		assume := AssumeAllRoles(ctx, roles)
+	roles, err = Load(rolesPath)
+	if err != nil {
+		l.Error.Fatalln(err)
+	}
+
+	//var assume *AssumeRoles
+	assume := AssumeAllRoles(ctx, roles)
+
+	nodesPath := outputPath + ".nodes.json"
+
+	if load {
+		err := assume.Load(nodesPath)
+		if err != nil {
+			l.Error.Fatalln(err)
+		}
+	} else if scan {
 		for _, cfg := range cfgs {
 			err := assume.Run(cfg)
 			if err != nil {
@@ -104,12 +127,54 @@ func main() {
 			}
 		}
 
-		assume.PrintGraph(cfgs)
-
-	} else {
-		l.Error.Fatalln("something went wrong")
+		if save {
+			err := assume.Save(nodesPath)
+			if err != nil {
+				l.Error.Fatalln(err)
+			}
+		}
 	}
 
+	graphPath := outputPath + ".graph.dot"
+
+	if len(assume.graph.Nodes) != 0 {
+		err = assume.PrintGraph(cfgs)
+		if err != nil {
+			l.Error.Fatalln(err)
+		}
+		err := assume.SaveDiagram(cfgs, graphPath)
+		if err != nil {
+			l.Error.Fatalln()
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			l.Error.Fatalln(err)
+		}
+
+		rel, err := filepath.Rel(cwd, graphPath)
+		if err != nil {
+			l.Error.Fatalf("failed to get relative path: %w", err)
+		}
+
+		fmt.Printf("Dotwiz output saved to %s. To convert this to an image use: \n\t", graphPath)
+		fmt.Printf("tred %s | circo -Goverlap=false -Tpng /dev/stdin -o ni.graph.png\n", rel)
+	}
+}
+
+func expandPath(path string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path, nil
+	}
+	if path == "~" {
+		path = home
+	} else if strings.HasPrefix(path, "~/") {
+		// Use strings.HasPrefix so we don't match paths like
+		// "/something/~/something/"
+		path = filepath.Join(home, path[2:])
+	}
+	return filepath.Abs(path)
 }
 
 func parseProfiles(ctx context.Context, profiles string, second int) ([]*aws.Config, error) {
@@ -159,7 +224,7 @@ func (a *AssumeRoles) Run(cfg *aws.Config) error {
 }
 
 func (a *AssumeRoles) assumeRoles(cfg *aws.Config, identity []string) {
-	l.Debug.Printf("running assumeRoles on %s", strings.Join(identity, " -> "))
+	l.Debug.Printf("running scan on %s", strings.Join(identity, " -> "))
 	currArn := identity[len(identity)-1]
 	if len(identity) == 60 {
 		l.Info.Printf("max depth of 50 reached when enumerating %s\n", currArn)
@@ -172,12 +237,15 @@ func (a *AssumeRoles) assumeRoles(cfg *aws.Config, identity []string) {
 		switch role.ExternalId.(type) {
 		case string:
 			externalIds = append(externalIds, aws.String(role.ExternalId.(string)))
-		case []string:
-			for _, id := range role.ExternalId.([]string) {
-				externalIds = append(externalIds, &id)
+		case []interface{}:
+			for _, id := range role.ExternalId.([]interface{}) {
+				//fmt.Println(reflect.TypeOf(id))
+				externalIds = append(externalIds, aws.String(id.(string)))
 			}
 		case nil:
 			externalIds = append(externalIds, nil)
+		default:
+			log.Fatalf("not sure what to do with external id type (%v)\n", reflect.TypeOf(role.ExternalId))
 		}
 
 		var externalId *string
@@ -235,7 +303,7 @@ func (a *AssumeRoles) PrintGraph(cfgs []*aws.Config) error {
 			return err
 		}
 
-		graph.DFS[string](a.graph, start, func(e *graph.Edge[string]) bool {
+		graph.DFS[string](a.graph, &start.Key, func(e *graph.Edge[string]) bool {
 			return e.Accessed != nil && *e.Accessed
 		}, nil, []string{}, func(node string, path []string) {
 			fmt.Printf("\n")
@@ -247,10 +315,160 @@ func (a *AssumeRoles) PrintGraph(cfgs []*aws.Config) error {
 			} else {
 				fmt.Printf(utils.Cyan.Color("->")+" %s", node)
 			}
-		})
+		}, false)
 	}
 	fmt.Printf("\n")
 	return nil
+}
+
+func (a *AssumeRoles) Save(path string) error {
+	file, err := os.Create(path)
+	defer file.Close()
+	if err != nil {
+		return err
+	}
+
+	for _, node := range a.graph.Nodes {
+		json, err := json.Marshal(node)
+		if err != nil {
+			return err
+		}
+
+		_, err = fmt.Fprintln(file, string(json))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *AssumeRoles) Load(path string) error {
+	file, err := ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	file = bytes.Trim(file, "\n")
+
+	for _, line := range bytes.Split(file, []byte("\n")) {
+		var node graph.Node[string]
+		err := json.Unmarshal(line, &node)
+		if err != nil {
+			return err
+		}
+		a.graph.Nodes[node.Key] = &node
+	}
+	return nil
+
+}
+
+func (a *AssumeRoles) SaveDiagram(cfgs []*aws.Config, path string) error {
+	g := graphviz.New()
+	gviz, err := g.Graph()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := gviz.Close(); err != nil {
+			log.Fatal(err)
+		}
+		g.Close()
+	}()
+	gviz.SetRankDir("LR")
+
+	color := ColorFromArn()
+
+	fmt.Println(utils.Green.Color("\nGraphViz:"))
+	for _, cfg := range cfgs {
+		resp, err := sts.NewFromConfig(*cfg).GetCallerIdentity(a.ctx, &sts.GetCallerIdentityInput{})
+		if err != nil {
+			return err
+		}
+
+		start, err := a.graph.GetNode(utils.CleanArn(*resp.Arn))
+		if err != nil {
+			return err
+		}
+
+		conv := map[string]*cgraph.Node{}
+
+		graph.DFS[string](a.graph, &start.Key, func(e *graph.Edge[string]) bool {
+			return e.Accessed != nil && *e.Accessed
+		}, nil, []string{}, func(node string, path []string) {
+			n1, err := a.graph.GetNode(node)
+			if err != nil {
+				log.Fatalln(err)
+			}
+
+			g1, ok := conv[node]
+			if !ok {
+				g1, err = gviz.CreateNode(n1.Key)
+				if err != nil {
+					log.Fatal(err)
+				}
+				g1.SetColor(color.Get(n1.Key))
+				g1.SetStyle("filled")
+				conv[n1.Key] = g1
+			}
+
+			for _, edge := range n1.Edges {
+				n2, err := a.graph.GetNode(edge.Node)
+				if err != nil {
+					log.Fatalln(err)
+				}
+
+				g2, ok := conv[n2.Key]
+				if !ok {
+					g2, err = gviz.CreateNode(n2.Key)
+					if err != nil {
+						log.Fatal(err)
+					}
+					g2.SetColor(color.Get(n2.Key))
+					g2.SetStyle("filled")
+					conv[n2.Key] = g2
+				}
+
+				e1, err := gviz.CreateEdge(fmt.Sprintf("%s-%s", n1.Key, n2.Key), g1, g2)
+				if err != nil {
+					log.Fatal(err)
+				}
+				e1.SetDir("forward")
+			}
+
+		}, false)
+	}
+
+	var buf bytes.Buffer
+	if err := g.Render(gviz, "dot", &buf); err != nil {
+		log.Fatal(err)
+	}
+
+	err = ioutil.WriteFile(path, buf.Bytes(), fs.FileMode(0640))
+	if err != nil {
+		return fmt.Errorf("failed writing graphviz output to %s: %w", path, err)
+	}
+	return nil
+}
+
+func ColorFromArn() colorFromArn {
+	return colorFromArn{}
+}
+
+type colorFromArn []*string
+
+func (c *colorFromArn) Get(arn string) string {
+	accountId := strings.Split(arn, ":")[4]
+	for i, prev := range *c {
+		if *prev == accountId {
+			resp := "/" + colorScheme + "/" + strconv.Itoa(i+1)
+			fmt.Println(resp)
+			return resp
+		}
+	}
+	*c = append(*c, &accountId)
+	resp := "/" + colorScheme + "/" + strconv.Itoa(len(*c))
+	fmt.Println(resp)
+	return resp
 }
 
 func Load(path string) ([]Role, error) {

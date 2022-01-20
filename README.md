@@ -1,6 +1,7 @@
 # liquidswards
 
-![Example](/docs/example.png)
+<img width="914" alt="example" src="https://user-images.githubusercontent.com/4079939/150443363-1ffcd0cd-94dd-4f5a-b5ae-7810803bb7ca.png">
+
 
 ## Build
 
@@ -33,3 +34,19 @@ Usage of ./liquidswards:
   -us-east-1 string
     	The AWS Region to use
 ```
+
+Create a graph from graphviz output.
+
+```
+circo -Goverlap=false -Tpng scan.dot -o scan.png
+```
+
+### What's with the name?
+
+It's named after the best solo Wu-Tang album.
+
+<img width="400" alt="liquidswords" src="https://user-images.githubusercontent.com/4079939/150443336-621ff008-e3a4-48bd-b871-0bb6afc8716b.jpg">
+
+### But you spelled it wrong.
+
+I disagree.
