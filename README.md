@@ -120,7 +120,7 @@ Usage of liquidswards:
         Role juggling.
   -access-refresh int
     	The refresh rate used for the accessplugin in seconds. This defaults to once an hour, but if you want
-     to bypass role revocation without usingcloudtrail events (-sns-queue option, see the README for more
+     to bypass role revocation without usingcloudtrail events (-sqs-queue option, see the README for more
      info) you can set this to approximately three seconds. (default 3600)
   -cloudtrail
     	Enable the CloudTrail plugin. This will attempt to discover new IAM Roles by searching for previous

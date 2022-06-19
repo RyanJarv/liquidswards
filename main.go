@@ -29,7 +29,7 @@ var (
 	profilesStr   string
 	file          string
 	access        bool
-	snsQueue      string
+	sqsQueue      string
 	accessRefresh int
 	cloudtrail    bool
 	name          string
@@ -93,14 +93,14 @@ info removed is also outputed to the console as well.
 	flag.StringVar(&file, "file", "", "A file containing a list of additional file to enumerate.")
 	flag.BoolVar(&access, "access", false, "Enable the maintain access plugin. This will "+
 		"attempt to maintain access to the discovered file through Role juggling.")
-	flag.StringVar(&snsQueue, "sns-queue", "", "SNS queue which receives IAM updates via CloudTrail/"+
+	flag.StringVar(&sqsQueue, "sqs-queue", "", "SQS queue which receives IAM updates via CloudTrail/"+
 		"CloudWatch/EventBridge. If set, -access-refresh is not used and access is only refreshed when the credentials"+
 		"are about to expire or access is revoked via the web console. Currently, the first profile passed with "+
-		"-profiles is used to access the SNS queue."+
+		"-profiles is used to access the SQS queue."+
 		"\nTODO: Make the profile used to access the queue configurable.")
 	flag.IntVar(&accessRefresh, "access-refresh", 3600, "The refresh rate used for the access"+
 		"plugin in seconds. This defaults to once an hour, but if you want to bypass role revocation without using"+
-		"cloudtrail events (-sns-queue option, see the README for more info) you can set this to approximately "+
+		"cloudtrail events (-sqs-queue option, see the README for more info) you can set this to approximately "+
 		"three seconds.")
 	flag.BoolVar(&cloudtrail, "cloudtrail", false, "Enable the CloudTrail plugin. This will "+
 		"attempt to discover new IAM Roles by searching for previous sts:SourceAssumeRole API calls in CloudTrail.")
@@ -177,9 +177,12 @@ info removed is also outputed to the console as well.
 			GlobalPluginArgs: globalArgs,
 			Path:             path,
 			AccessRefresh:    accessRefresh,
-			SnsConfig:        cfgs[0].Config(),
-			SnsQueue:         snsQueue,
+			SqsConfig:        cfgs[0].Config(),
+			SqsQueue:         sqsQueue,
 		})
+		for _, cfg := range cfgs {
+			newAccess.Run(ctx, cfg)
+		}
 		if err != nil {
 			ctx.Error.Fatalln(err)
 		}

@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"strings"
@@ -156,35 +157,21 @@ func (c *Config) Arn() string {
 	return c.source.Arn
 }
 
+func (c *Config) Type() SourceType {
+	return c.source.Type
+}
+
 func (c *Config) Account() string {
 	return c.account
 }
 
 func (c *Config) Refresh(ctx utils.Context) (*Config, error) {
 	c.state = RefreshingState
-	node, err := c.graph.GetNode(c.Arn())
-	if err != nil {
-		return nil, fmt.Errorf("RefreshingState(): %w", err)
-	}
-
-	var cfg *Config
-	for _, src := range node.Inbound() {
-		cfg, err = src.Value().Assume(ctx, c.Arn())
-		if err == nil {
-			break
-		}
-	}
-
-	if cfg == nil {
-		c.SetState(FailedState)
-		in := node.Inbound()
-		names := strings.Join(utils.Keys(in), ", ")
-		return nil, fmt.Errorf("unable to refresh credentials from: %s", names)
+	if c.Type() == SourceProfile {
+		return c.RefreshProfile(ctx)
 	} else {
-		c.SetState(ActiveState)
+		return c.RefreshRole(ctx)
 	}
-
-	return cfg, nil
 }
 
 // CredProvider uses the passed aws.Credentials if valid, otherwise credentials are refreshed from the graph.
@@ -251,6 +238,49 @@ func (c *Config) UnmarshalJSON(bytes []byte) error {
 
 	*c = *cfg
 	return nil
+}
+
+func (c *Config) RefreshRole(ctx utils.Context) (*Config, error) {
+	node, err := c.graph.GetNode(c.Arn())
+	if err != nil {
+		return nil, fmt.Errorf("RefreshingState(): %w", err)
+	}
+
+	var cfg *Config
+	for _, src := range node.Inbound() {
+		cfg, err = src.Value().Assume(ctx, c.Arn())
+		if err == nil {
+			break
+		}
+	}
+
+	if cfg == nil {
+		c.SetState(FailedState)
+		in := node.Inbound()
+		names := strings.Join(utils.Keys(in), ", ")
+		return nil, fmt.Errorf("unable to refresh credentials from: %s", names)
+	} else {
+		c.SetState(ActiveState)
+	}
+
+	return cfg, nil
+}
+
+func (c *Config) RefreshProfile(ctx utils.Context) (*Config, error) {
+	svc := iam.NewFromConfig(c.cfg)
+	key, err := svc.CreateAccessKey(ctx, &iam.CreateAccessKeyInput{
+		UserName: aws.String(c.source.Name),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating access key for %s: %w", c.source.Name, err)
+	}
+	c.cfg.Credentials = credentials.NewStaticCredentialsProvider(
+		*key.AccessKey.AccessKeyId,
+		*key.AccessKey.SecretAccessKey,
+		"",
+	)
+	ctx.Info.Printf("New credentials for %s: AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s", c.source.Name, *key.AccessKey.AccessKeyId, *key.AccessKey.SecretAccessKey)
+	return c, nil
 }
 
 func ParseProfiles(ctx utils.Context, profiles string, region string, g *graph.Graph[*Config]) ([]*Config, error) {

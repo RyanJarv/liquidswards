@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	testSnsQueue  = "https://127.0.0.1"
+	testsqsQueue  = "https://127.0.0.1"
 	testAccountId = "123456789012"
 	testRegion    = "us-east-1"
 	testPath      = "/test/path"
@@ -57,8 +57,8 @@ func TestAccess_RunSqsClient(t *testing.T) {
 		NewAccessInput: &NewAccessInput{
 			Context:          ctx,
 			GlobalPluginArgs: GlobalPluginArgs{Debug: true, Region: "us-east-1"},
-			SnsQueue:         "https://test-sns-queue.local",
-			SnsConfig:        aws.Config{Region: "us-east-1"},
+			SqsQueue:         "https://test-sqs-queue.local",
+			SqsConfig:        aws.Config{Region: "us-east-1"},
 		},
 		cfgs: map[string][]chan int{
 			"role-a": {make(chan int, 10), make(chan int, 10)},
@@ -172,10 +172,10 @@ func NewTestAccess(g *graph.Graph[*creds.Config]) (*Access, error) {
 		},
 		Path:          testPath,
 		AccessRefresh: 3,
-		SnsConfig: aws.Config{
+		SqsConfig: aws.Config{
 			Region:      testRegion,
 			Credentials: credentials.NewStaticCredentialsProvider("key", "secret", "session"),
 		},
-		SnsQueue: testSnsQueue,
+		SqsQueue: testsqsQueue,
 	})
 }
