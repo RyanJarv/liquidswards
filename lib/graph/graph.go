@@ -25,11 +25,6 @@ type Graph[T Value] struct {
 
 // The AddEdge method adds an edge between two vertices in the graph
 func (g *Graph[T]) AddEdge(k1, k2 T) {
-	// Avoid self-cycles
-	if k1.ID() == k2.ID() {
-		return
-	}
-
 	n1, err := g.getNode(k1.ID())
 	if err != nil {
 		n1 = g.AddNode(k1)
