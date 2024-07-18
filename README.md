@@ -1,5 +1,9 @@
 # liquidswards
 
+***Fun fact:** This project is how I discovered the undocumented [Implicit SAR](https://blog.ryanjarv.sh/sar/sar-1-self-assume-role-overview.html) behavior
+in AWS IAM. This in turn resulted in (to my knowledge) the first and only backwards incompatible change of it's scale to IAM in 2022, which was announced by
+AWS [here](https://aws.amazon.com/blogs/security/announcing-an-update-to-iam-role-trust-policy-behavior/).*
+
 ## What does it do?
 
 * Recursively discovers and enumerates access to sts:AssumeRole.
