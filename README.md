@@ -13,7 +13,7 @@ AWS [here](https://aws.amazon.com/blogs/security/announcing-an-update-to-iam-rol
 before using it.
 
 ![Screen Shot 2022-01-20 at 11 04 21 PM](https://user-images.githubusercontent.com/4079939/150481797-1172bd65-1779-497d-a77e-78a6956ce117.png)
-
+<img src="https://github.com/user-attachments/assets/2d7fc8e2-b008-4b8a-95b8-51004c6a08e0" width="100%">
 
 https://user-images.githubusercontent.com/4079939/152632976-813343ff-f89d-46b3-80e9-20ee3e9bcff0.mov
 
