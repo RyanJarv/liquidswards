@@ -2,12 +2,14 @@ package utils
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"github.com/alitto/pond"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/dlsniper/debugger"
 	"github.com/go-test/deep"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -18,6 +20,8 @@ import (
 )
 
 var Arrow = fmt.Sprintf(" %s ", Cyan.Color(" --assumes--> "))
+
+var PluginArgs = flag.NewFlagSet("plugin", flag.ExitOnError)
 
 const (
 	colorScheme = "pastel28"
@@ -45,15 +49,10 @@ func NewContext(parentCtx context.Context) Context {
 		Context: parentCtx,
 		Error:   log.New(os.Stderr, Red.Color("[ERROR] "), 0),
 		Info:    log.New(os.Stdout, Green.Color("[INFO] "), 0),
-		Debug:   log.Default(),
+		Debug:   log.New(os.Stdout, Gray.Color("[DEBUG] "), 0),
 	}
 
-	null, err := os.Open(os.DevNull)
-	if err != nil {
-		ctx.Error.Fatalln(err)
-	}
-	ctx.Debug.SetOutput(null)
-
+	ctx.Debug.SetOutput(io.Discard)
 	return ctx
 }
 
@@ -67,27 +66,23 @@ type Context struct {
 
 func (ctx *Context) SetLoggingLevel(level LogLevel) Context {
 	ctx.LogLevel = level
-	null, err := os.Open(os.DevNull)
-	if err != nil {
-		ctx.Error.Fatalln(err)
-	}
 
 	if int(level) >= int(ErrorLogLevel) {
 		ctx.Error = log.New(os.Stderr, Red.Color("[ERROR] "), 0)
 	} else {
-		ctx.Error.SetOutput(null)
+		ctx.Error.SetOutput(io.Discard)
 	}
 
 	if int(level) >= int(InfoLogLevel) {
-		ctx.Info = log.New(os.Stdout, Green.Color("[INFO] "), 0)
+		ctx.Info = log.New(os.Stderr, Green.Color("[INFO] "), 0)
 	} else {
-		ctx.Info.SetOutput(null)
+		ctx.Info.SetOutput(io.Discard)
 	}
 
 	if int(level) >= int(DebugLogLevel) {
 		ctx.Debug = log.New(os.Stderr, Gray.Color("[DEBUG] "), 0)
 	} else {
-		ctx.Info.SetOutput(null)
+		ctx.Info.SetOutput(io.Discard)
 	}
 	return *ctx
 }
@@ -199,12 +194,17 @@ func Must[T any](v T, err error) T {
 	return v
 }
 
+func Must0(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
 func MonitorPoolStats(ctx Context, msg string, pool *pond.WorkerPool) {
 	go func() {
 		for ctx.IsRunning("exiting monitor pool:", msg) {
 			ctx.Sleep(time.Second * 5)
-			fmt.Println(
-				msg,
+			ctx.Debug.Println(msg,
 				"wait:", pool.WaitingTasks(),
 				"run:", pool.RunningWorkers(),
 				"idle:", pool.IdleWorkers(),

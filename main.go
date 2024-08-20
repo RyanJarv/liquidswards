@@ -4,118 +4,88 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/RyanJarv/liquidswards/lib"
 	"github.com/RyanJarv/liquidswards/lib/creds"
+	"github.com/RyanJarv/liquidswards/lib/graph"
 	"github.com/RyanJarv/liquidswards/lib/plugins"
+	"github.com/RyanJarv/liquidswards/lib/types"
 	"github.com/RyanJarv/liquidswards/lib/utils"
-	"github.com/RyanJarv/lq"
 	"github.com/alitto/pond"
-	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 const MaxWorkers = 100
 const MaxCapacity = 1000
 
 var (
-	region        string
-	scopeStr      string
-	noScope       bool
-	profilesStr   string
-	file          string
-	access        bool
-	sqsQueue      string
-	accessRefresh int
-	cloudtrail    bool
-	name          string
-	noScan        bool
-	noSave        bool
-	load          bool
-	debug         bool
-	ctx           = utils.NewContext(context.Background())
+	ctx = utils.NewContext(context.Background())
+
+	region   = flag.String("region", "us-east-1", "The AWS Region to use")
+	scopeStr = flag.String("scope", "", `
+List of AWS account ID's (seperated by comma's) that are in scope. Accounts associated with any profiles used are 
+always in scope regardless of this value.
+`)
+	noScope = flag.Bool("no-scope", false, `
+Disable scope, all discovered role ARN's belonging to ANY account will be enumerated for access and additional file 
+recursively.
+`)
+	profilesStr = flag.String("profiles", "", "List of AWS profiles (seperated by commas)")
+	name        = flag.String("name", "default", "Name of environment, used to store and retrieve graphs.")
+	noSave      = flag.Bool("no-save", false, "Do not save scan results to disk.")
+	load        = flag.Bool("load", false, "Load results from previous scans.")
+	debug       = flag.Bool("debug", false, "Enable debug output")
+
+	help = strings.Replace(`
+	liquidswards discovers and enumerates access to IAM Roles via sts:SourceAssumeRole API call's. \
+For each account associated with a profile passed on the command line it will discover roles via \
+iam:ListRoles and searching CloudTrail for sts:SourceAssumeRole calls by other users. For each \
+role discovered it will attempt to call sts:SourceAssumeRole on it from each fole the tool currently \
+has access to, if the call succeeds the discovery and access enumeration steps are repeated from that \
+Role. Inbound other words it attempts to recursively discover and enumerate all possible \
+sts:SourceAssumeRole paths that exist from the profiles passed on the command line.
+
+	It purposefully avoids relying on IAM parsing extensively due to the complexity involved as \
+well as the goal of discovering what is known to be possible rather then what we think is possible.
+
+	The tool maintains a graph which is persisted to disk of file that where accessed. This is stored in \
+~/.liquidswards/<name>/ based on the name passed to the -name argument. This can be used to sav and load \
+different sessions. The graph is used internally to build a GraphViz .dot file at the end of the run which \
+can be converted to an image of accessible file. A simplified version of this graph with some info removed \
+is also outputed to the console as well.
+
+`, "\\\n", "", -1)
+
+	allPlugins = []types.NewPluginFunc{
+		plugins.NewCloudTrail,
+		plugins.NewSqs,
+		plugins.NewFile,
+		plugins.NewRefresh,
+		plugins.NewAssume,
+		plugins.NewList,
+	}
 )
 
 func main() {
 	flag.Usage = func() {
-		w := flag.CommandLine.Output() // may be os.Stderr - but not necessarily
-		fmt.Fprintf(w, "Usage of liquidswards:\n")
-
+		w := flag.CommandLine.Output()
+		utils.Must(fmt.Fprintf(w, "Main arguments:\n"))
 		flag.PrintDefaults()
-
-		fmt.Fprintf(
-			w,
-			`
-	liquidswards discovers and enumerates access to IAM Roles via
-sts:SourceAssumeRole API call's. For each account associated with a profile
-passed on the command line it will discover file via iam:ListRoles and
-searching CloudTrail for sts:SourceAssumeRole calls by other users. For each
-role discovered it will attempt to call sts:SourceAssumeRole on it from each
-fole the tool currently has access to, if the call succeeds the
-discovery and access enumeration steps are repeated from that Role. Inbound
-other words it attempts to recursively discover and enumerate all
-possible sts:SourceAssumeRole paths that exist from the profiles passed on
-the command line.
-
-	It purposefully avoids relying on IAM parsing extensively due
-to the complexity involved as well as the goal of discovering what is
-known to be possible rather then what we think is possible (TODO make
-this configurable to reduce API calls).
-
-	The tool maintains a graph which is persisted to disk of file
-that where accessed. This is stored in ~/.liquidswards/<name>/ based
-on the name passed to the -name argument. This can be used to sav and
-load different sessions. The graph is used internally to build a
-GraphViz .dot file at the end of the run which can be converted to an
-image of accessible file. A simplified version of this graph with some
-info removed is also outputed to the console as well.
-
-`)
+		utils.Must(fmt.Fprintf(w, "Plugin arguments:\n"))
+		utils.PluginArgs.PrintDefaults()
+		utils.Must(fmt.Fprintf(w, "About liquidswards:\n"))
+		utils.Must(fmt.Fprintf(w, help))
 	}
 
-	flag.StringVar(&region, "region", "us-east-1", "The AWS Region to use")
-	flag.StringVar(&scopeStr, "scope", "",
-		"List of AWS account ID's (seperated by comma's) that are in scope. \n"+
-			"Accounts associated with any profiles used are always in scope \n"+
-			"regardless of this value.")
-	flag.BoolVar(&noScope, "no-scope", false,
-		"Disable scope, all discovered role ARN's belonging to ANY account \n"+
-			"will be enumerated for access and additional file recursively.\n\n"+
-			"IMPORTANT: Use caution, this can lead to a *LOT* of unintentional \n"+
-			"access if you are (un)lucky.\n\n"+
-			"TODO: Add a mode that tests for discovered file in other accounts \n"+
-			"but does not recursively search them.")
-	flag.StringVar(&profilesStr, "profiles", "", "List of AWS profiles (seperated by commas)")
-	flag.StringVar(&file, "file", "", "A file containing a list of additional file to enumerate.")
-	flag.BoolVar(&access, "access", false, "Enable the maintain access plugin. This will "+
-		"attempt to maintain access to the discovered file through Role juggling.")
-	flag.StringVar(&sqsQueue, "sqs-queue", "", "SQS queue which receives IAM updates via CloudTrail/"+
-		"CloudWatch/EventBridge. If set, -access-refresh is not used and access is only refreshed when the credentials"+
-		"are about to expire or access is revoked via the web console. Currently, the first profile passed with "+
-		"-profiles is used to access the SQS queue."+
-		"\nTODO: Make the profile used to access the queue configurable.")
-	flag.IntVar(&accessRefresh, "access-refresh", 3600, "The refresh rate used for the access"+
-		"plugin in seconds. This defaults to once an hour, but if you want to bypass role revocation without using"+
-		"cloudtrail events (-sqs-queue option, see the README for more info) you can set this to approximately "+
-		"three seconds.")
-	flag.BoolVar(&cloudtrail, "cloudtrail", false, "Enable the CloudTrail plugin. This will "+
-		"attempt to discover new IAM Roles by searching for previous sts:SourceAssumeRole API calls in CloudTrail.")
-	flag.BoolVar(&noScan, "no-scan", false, "Do not attempt to assume file any file.")
-	flag.BoolVar(&noSave, "no-save", false, "Do not save scan results to disk.")
-	flag.BoolVar(&load, "load", false, "Load results from previous scans.")
-	flag.StringVar(&name, "name", "default", "Name of environment, used to store and retrieve graphs.")
-	flag.BoolVar(&debug, "debug", false, "Enable debug output")
 	flag.Parse()
 
-	if debug {
+	if *debug {
 		ctx.SetLoggingLevel(utils.DebugLogLevel)
 	}
 
-	if region != "" {
+	if *region != "" {
 		ctx.Debug.Printf("using region %s\n", region)
 	}
 
@@ -123,26 +93,25 @@ info removed is also outputed to the console as well.
 		ctx.Error.Fatalln("extra arguments detected, did you mean to pass a comma seperated list to -profiles instead?")
 	}
 
-	path, err := utils.ExpandPath(fmt.Sprintf("~/.liquidswards/%s", name))
+	err := Run()
 	if err != nil {
-		ctx.Error.Fatalln("failed to expand path: %w", err)
+		ctx.Error.Fatalln(err)
 	}
 
-	err = os.MkdirAll(path, os.FileMode(0750))
-	if err != nil {
-		ctx.Error.Fatalf("unable to create directory %s: %s\n", path, err)
-	}
+}
 
-	graph := lib.NewGraph()
+func Run() error {
+	graph := graph.NewDirectedGraph[*creds.Config]()
+
 	// TODO: Move to assumeroles?
-	cfgs, err := creds.ParseProfiles(ctx, profilesStr, region, graph)
+	cfgs, err := creds.ParseProfiles(ctx, *profilesStr, *region, graph)
 	if err != nil {
 		ctx.Error.Fatalf("parsing profiles: %s\n", err)
 	}
 
 	var scope []string
-	if !noScope {
-		scope = creds.ParseScope(scopeStr, cfgs)
+	if !*noScope {
+		scope = creds.ParseScope(*scopeStr, cfgs)
 		ctx.Info.Printf("scope is currently set to: %s\n", strings.Join(scope, ", "))
 	} else {
 		ctx.Info.Printf("scope is not currently set!!!")
@@ -151,108 +120,58 @@ info removed is also outputed to the console as well.
 	scanCtx := ScanContext(ctx)
 
 	pool := pond.New(MaxWorkers, MaxCapacity, pond.Strategy(pond.Eager()))
-	if debug {
+	if *debug {
 		utils.MonitorPoolStats(scanCtx, "assumeRole worker pool:", pool)
 	}
 
-	globalArgs := plugins.GlobalPluginArgs{
-		Debug:  debug,
-		Region: region,
-		Lq:     lq.NewListQueue[types.Role](),
-		Graph:  graph,
-		Scope:  scope,
+	args := types.GlobalPluginArgs{
+		Region:           *region,
+		FoundRoles:       utils.NewIterator[types.Role](),
+		Access:           utils.NewIterator[*creds.Config](),
+		Graph:            graph,
+		Scope:            scope,
+		ProgramDir:       utils.Must(GetProgramDir()),
+		PrimaryAwsConfig: cfgs[0].Config(),
+		AwsConfigs:       cfgs,
 	}
 
-	discPlugins := []plugins.DiscoveryPlugin{}
-
-	if cloudtrail {
-		discPlugins = append(discPlugins, plugins.NewCloudTrailPlugin(&plugins.NewCloudTrailInput{
-			GlobalPluginArgs: globalArgs,
-		}))
-	}
-
-	if access {
-		newAccess, err := plugins.NewAccess(&plugins.NewAccessInput{
-			Context:          ctx,
-			GlobalPluginArgs: globalArgs,
-			Path:             path,
-			AccessRefresh:    accessRefresh,
-			SqsConfig:        cfgs[0].Config(),
-			SqsQueue:         sqsQueue,
-		})
-		for _, cfg := range cfgs {
-			newAccess.Run(ctx, cfg)
-		}
-		if err != nil {
-			ctx.Error.Fatalln(err)
-		}
-		discPlugins = append(discPlugins, newAccess)
-	}
-
-	if file != "" {
-		discPlugins = append(discPlugins, plugins.NewFilePlugin(&plugins.NewFilePluginInput{
-			GlobalPluginArgs: globalArgs,
-			FileLocation:     file,
-		}))
-	}
-
-	assume := lib.AssumeAllRoles(globalArgs, pool, discPlugins)
-
-	graphPath := filepath.Join(path, "nodes.json")
-	if load {
-		err = assume.Graph.Load(graphPath)
-		for _, node := range assume.Graph.Nodes() {
-			node.Value().SetGraph(assume.Graph)
-		}
-		if err != nil {
-			ctx.Info.Printf("error loading graph, skipping: %s\n", err)
+	graphPath := filepath.Join(args.ProgramDir, "nodes.json")
+	if *load {
+		if err := graph.Load(graphPath); err != nil {
+			return fmt.Errorf("error loading graph: %w", err)
 		}
 	}
 
 	if len(flag.Args()) == 1 {
-		arn := flag.Args()[0]
-		node, err := assume.Graph.GetNode(arn)
-		if err != nil {
-			ctx.Error.Fatalln(err)
-		}
-		creds, err := node.Value().Config().Credentials.Retrieve(ctx)
-		if err != nil {
-			ctx.Error.Fatalln(err)
-		}
-
-		fmt.Printf("AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s",
-			creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken)
-		return
+		return PrintCreds(graph, flag.Args()[0])
 	}
 
-	if noScan {
-		// Plugins typically get run when a role is discovered, if the scan is skipped we need to trigger them here.
-		RunAllPlugins(scanCtx, assume, cfgs)
-	} else {
-		err = assume.Scan(scanCtx, cfgs)
-		if err != nil {
-			ctx.Error.Fatalf("scan failed: %s\n", err)
+	// Plugins typically get run when a role is discovered, if the scan is skipped we need to trigger them here.
+	for _, plugin := range allPlugins {
+		p := plugin(scanCtx, args)
+
+		if enabled, reason := p.Enabled(); enabled {
+			ctx.Info.Printf("plugin %s is enabled: %s\n", p.Name(), reason)
+			p.Run(ctx)
+		} else {
+			ctx.Info.Printf("plugin %s is disabled: %s\n", p.Name(), reason)
 		}
 	}
 
-	<-scanCtx.Done()
+	for _, cfg := range cfgs {
+		args.Access.Add(cfg)
+	}
 
-	//a.Lq.Wait()
-
-	// TODO: fix this
-	// the lq wait group seems to be slightly off so wait a sec after the scan as a hack
-	time.Sleep(time.Second)
-
-	if !noSave {
-		err := assume.Graph.Save(graphPath)
+	if !*noSave {
+		err := graph.Save(graphPath)
 		if err != nil {
 			ctx.Error.Fatalf("error saving report: %s\n", err)
 		}
 	}
 
-	if len(assume.Graph.Nodes()) != 0 {
-		graphVizPath := filepath.Join(path, "graph.dot")
-		err = assume.Report(ctx, cfgs, graphVizPath)
+	if len(graph.Nodes()) != 0 {
+		graphVizPath := filepath.Join(args.ProgramDir, "graph.dot")
+		err = graph.Report(ctx, cfgs, graphVizPath)
 		if err != nil {
 			ctx.Error.Fatalf("generating report failed: %s\n", err)
 		}
@@ -265,6 +184,37 @@ info removed is also outputed to the console as well.
 		fmt.Printf("\t\ttred %s | circo -Tpng /dev/stdin -o graph.png\n", graphVizPath)
 	}
 
+	return nil
+}
+
+func PrintCreds(g *graph.Graph[*creds.Config], arn string) error {
+	node, ok := g.GetNode(arn)
+	if !ok {
+		return fmt.Errorf("role %s not found in graph", arn)
+	}
+
+	creds, err := node.Value().Config().Credentials.Retrieve(ctx)
+	if err != nil {
+		return fmt.Errorf("error retrieving credentials: %w", err)
+	}
+
+	fmt.Printf("AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s",
+		creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken)
+
+	return nil
+}
+
+func GetProgramDir() (string, error) {
+	path, err := utils.ExpandPath(fmt.Sprintf("~/.liquidswards/%s", name))
+	if err != nil {
+		ctx.Error.Fatalln("failed to expand path: %w", err)
+	}
+
+	err = os.MkdirAll(path, os.FileMode(0750))
+	if err != nil {
+		ctx.Error.Fatalf("unable to create directory %s: %s\n", path, err)
+	}
+	return path, err
 }
 
 func ScanContext(ctx utils.Context) utils.Context {
@@ -278,12 +228,4 @@ func ScanContext(ctx utils.Context) utils.Context {
 		cancelScan()
 	}()
 	return scanCtx
-}
-
-func RunAllPlugins(ctx utils.Context, assume *lib.AssumeRoles, cfgs []*creds.Config) {
-	for _, plugin := range assume.Plugins {
-		for _, cfg := range assume.Graph.Nodes() {
-			plugin.Run(ctx, cfg.Value())
-		}
-	}
 }

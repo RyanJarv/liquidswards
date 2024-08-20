@@ -3,38 +3,50 @@ package plugins
 import (
 	"bytes"
 	"fmt"
-	"github.com/RyanJarv/liquidswards/lib/creds"
+	"github.com/RyanJarv/liquidswards/lib/types"
 	"github.com/RyanJarv/liquidswards/lib/utils"
 	"github.com/alitto/pond"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/iam/types"
-	"io/ioutil"
+	"os"
 	"strings"
 	"sync"
 )
 
+var file = utils.PluginArgs.String("file", "", "A file containing a list of additional file to enumerate.")
+
 type NewFilePluginInput struct {
-	GlobalPluginArgs
-	FileLocation string
+	types.GlobalPluginArgs
 }
 
-func NewFilePlugin(in *NewFilePluginInput) *FilePlugin {
+func NewFile(_ utils.Context, in types.GlobalPluginArgs) types.Plugin {
 	return &FilePlugin{
-		NewFilePluginInput: in,
-		m:                  &sync.RWMutex{},
-		covered:            map[string]bool{},
+		GlobalPluginArgs: in,
+		m:                &sync.RWMutex{},
+		covered:          map[string]bool{},
+	}
+}
+
+func (a *FilePlugin) Name() string {
+	return "file"
+}
+
+func (a *FilePlugin) Enabled() (bool, string) {
+	if *file == "" {
+		return false, "no -file arg provided"
+	} else {
+		return true, fmt.Sprintf("will read from %s", *file)
 	}
 }
 
 type FilePlugin struct {
-	*NewFilePluginInput
-	Pool    *pond.WorkerPool
-	m       *sync.RWMutex
-	covered map[string]bool
+	types.GlobalPluginArgs
+	FileLocation string
+	Pool         *pond.WorkerPool
+	m            *sync.RWMutex
+	covered      map[string]bool
 }
 
-func (f *FilePlugin) Run(ctx utils.Context, _ *creds.Config) {
-	file, err := ioutil.ReadFile(f.FileLocation)
+func (f *FilePlugin) Run(ctx utils.Context) {
+	file, err := os.ReadFile(f.FileLocation)
 	if err != nil {
 		ctx.Error.Printf("error reading %s: %s", f.FileLocation, err)
 	}
@@ -47,7 +59,7 @@ func (f *FilePlugin) Run(ctx utils.Context, _ *creds.Config) {
 			continue
 		}
 
-		if f.Lq.AddUnique(arn, types.Role{Arn: aws.String(arn)}) {
+		if f.FoundRoles.Add(types.NewRole(arn)) {
 			fmt.Printf("File: Found role %s\n", arn)
 		}
 	}

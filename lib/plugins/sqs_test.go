@@ -4,19 +4,21 @@ import (
 	"context"
 	"github.com/RyanJarv/liquidswards/lib/creds"
 	"github.com/RyanJarv/liquidswards/lib/graph"
+	"github.com/RyanJarv/liquidswards/lib/types"
 	"github.com/RyanJarv/liquidswards/lib/utils"
-	"github.com/RyanJarv/lq"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	types2 "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	sqsTypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/aws/smithy-go/middleware"
+	"github.com/google/go-cmp/cmp"
+	"strings"
 	"testing"
+	"time"
 )
 
 const (
-	testsqsQueue  = "https://127.0.0.1"
+	testSqsQueue  = "https://test-sqs-queue.loca"
 	testAccountId = "123456789012"
 	testRegion    = "us-east-1"
 	testPath      = "/test/path"
@@ -43,7 +45,7 @@ func TestAccess_Run(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	access.Run(ctx, cfg)
+	access.Run(ctx)
 
 	want := "active"
 	if got := cfg.State(); got != creds.ActiveState {
@@ -52,13 +54,20 @@ func TestAccess_Run(t *testing.T) {
 	cfg.SetState(creds.RefreshingState)
 }
 
+type MockGetNode []string
+
+func (m *MockGetNode) GetNode(k string) (graph.Node[*creds.Config], bool) {
+	*m = append(*m, k)
+	return nil, false
+}
+
+// TODO: Clean this up
 func TestAccess_RunSqsClient(t *testing.T) {
-	access := &Access{
-		NewAccessInput: &NewAccessInput{
-			Context:          ctx,
-			GlobalPluginArgs: GlobalPluginArgs{Debug: true, Region: "us-east-1"},
-			SqsQueue:         "https://test-sqs-queue.local",
-			SqsConfig:        aws.Config{Region: "us-east-1"},
+	access := &Sqs{
+		SqsQueue: testSqsQueue,
+		GlobalPluginArgs: types.GlobalPluginArgs{
+			Region:           "us-east-1",
+			PrimaryAwsConfig: aws.Config{Region: "us-east-1"},
 		},
 		cfgs: map[string][]chan int{
 			"role-a": {make(chan int, 10), make(chan int, 10)},
@@ -67,34 +76,36 @@ func TestAccess_RunSqsClient(t *testing.T) {
 		},
 	}
 
-	nameCh := make(chan string)
-	sqsCtx, cancel := ctx.WithCancel()
+	runCtx, cancelFunc := ctx.WithCancel()
+	ch := make(chan string, 0)
 
-	go access.RunSqsClient(sqsCtx, func(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	got := MockGetNode{}
+	want := MockGetNode{
+		"arn:aws:iam::123456789012:role/role-a",
+		"arn:aws:iam::123456789012:role/role-b",
+		"arn:aws:iam::123456789012:role/role-c",
+	}
+
+	go access.RunSqsClient(runCtx, func(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
 		return &sqs.ReceiveMessageOutput{
-			Messages: []types2.Message{
-				{Body: revokeSessMsg(<-nameCh)},
+			Messages: []sqsTypes.Message{
+				{Body: revokeSessMsg(strings.Split(<-ch, "/")[1])},
 			},
 			ResultMetadata: middleware.Metadata{},
 		}, nil
 	}, func(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
 		return &sqs.DeleteMessageOutput{}, nil
-	})
+	}, got.GetNode)
 
-	nameCh <- "role-a"
-	nameCh <- "role-b"
-	nameCh <- "role-c"
-	cancel()
+	for _, arn := range want {
+		ch <- arn
+	}
 
-	for name, refreshChs := range access.cfgs {
-		for i, refreshCh := range refreshChs {
-			select {
-			case <-refreshCh:
-				ctx.Info.Printf("refreshed chan # %d of %s\n", i, name)
-			default:
-				t.Errorf("no refresh recieved for chan # %d of %s", i, name)
-			}
-		}
+	time.Sleep(1 * time.Second)
+	cancelFunc()
+
+	if diff := cmp.Diff(got, want); diff != "" {
+		t.Errorf("got != want, -got +want:\n%s", diff)
 	}
 }
 
@@ -104,7 +115,7 @@ func revokeSessMsg(name string) *string {
 	  "id": "b0f351e0-8ee9-dc51-0f64-682db2c0e8fd",
 	  "detail-type": "AWS API Call via CloudTrail",
 	  "source": "aws.iam",
-	  "account": "336983520827",
+	  "account": "123456789012",
 	  "time": "2022-02-16T01:36:00Z",
 	  "detail": {
 		"eventName": "PutRolePolicy",
@@ -113,12 +124,13 @@ func revokeSessMsg(name string) *string {
 		  "policyName": "AWSRevokeOlderSessions",
 		  "policyDocument": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"*\"],\"Resource\":[\"*\"],\"Condition\":{\"DateLessThan\":{\"aws:TokenIssueTime\":\"2022-02-16T01:36:00.138Z\"}}}]}"
 		},
-		"recipientAccountId": "336983520827"
+		"recipientAccountId": "123456789012"
 	  }
 	}`)
 }
-
 func TestAccess_Full(t *testing.T) {
+	t.Skip("Requires AWS credentials")
+
 	g := graph.NewDirectedGraph[*creds.Config]()
 	source, err := creds.NewTestAssumesAllConfig(creds.SourceAssumeRole, "role/source", g)
 	if err != nil {
@@ -145,8 +157,7 @@ func TestAccess_Full(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	access.Run(ctx, source)
-	access.Run(ctx, target)
+	access.Run(ctx)
 
 	bytes, err := g.MarshalJSON()
 	if err != nil {
@@ -160,22 +171,21 @@ func TestAccess_Full(t *testing.T) {
 	}
 }
 
-func NewTestAccess(g *graph.Graph[*creds.Config]) (*Access, error) {
-	return NewAccess(&NewAccessInput{
-		Context: ctx,
-		GlobalPluginArgs: GlobalPluginArgs{
-			Debug:  false,
-			Region: "us-east-1",
-			Lq:     lq.NewListQueue[types.Role](),
-			Graph:  g,
-			Scope:  []string{testAccountId},
+func NewTestAccess(g *graph.Graph[*creds.Config]) (*Sqs, error) {
+	return &Sqs{
+		GlobalPluginArgs: types.GlobalPluginArgs{
+			Region:     "us-east-1",
+			Access:     utils.Iterator[*creds.Config]{},
+			FoundRoles: utils.Iterator[types.Role]{},
+			Graph:      g,
+			Scope:      []string{testAccountId},
+			ProgramDir: testPath,
+			PrimaryAwsConfig: aws.Config{
+				Region:      testRegion,
+				Credentials: credentials.NewStaticCredentialsProvider("key", "secret", "session"),
+			},
 		},
-		Path:          testPath,
-		AccessRefresh: 3,
-		SqsConfig: aws.Config{
-			Region:      testRegion,
-			Credentials: credentials.NewStaticCredentialsProvider("key", "secret", "session"),
-		},
-		SqsQueue: testsqsQueue,
-	})
+		SqsQueue: *sqsQueue,
+		cfgs:     map[string][]chan int{},
+	}, nil
 }

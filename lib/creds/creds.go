@@ -13,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go-v2/service/sts/types"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -48,9 +47,10 @@ const (
 )
 
 type Source struct {
-	Type SourceType
-	Name string
-	Arn  string
+	Type   SourceType
+	Name   string
+	Arn    string
+	Source *Source
 }
 
 func NewConfig(ctx utils.Context, creds aws.Credentials, region string, src Source) (*Config, error) {
@@ -92,13 +92,16 @@ type Config struct {
 	cfg    aws.Config
 	ctx    utils.Context
 	state  State
-	m      sync.Mutex
 
 	// A bit of a hack for mocking, imagine there is a better way to do this.
 	AssumeRole  func(ctx context.Context, params *sts.AssumeRoleInput, optFns ...func(*sts.Options)) (*sts.AssumeRoleOutput, error)
 	graph       *graph.Graph[*Config]
 	account     string
 	initalCreds aws.Credentials
+}
+
+func (c Config) Id() string {
+	return c.source.Arn
 }
 
 func (c *Config) State() State {
@@ -133,9 +136,10 @@ func (c *Config) Assume(ctx utils.Context, arn string) (*Config, error) {
 	}
 
 	src := Source{
-		Type: SourceAssumeRole,
-		Name: arn,
-		Arn:  arn,
+		Type:   SourceAssumeRole,
+		Source: &c.source,
+		Name:   arn,
+		Arn:    arn,
 	}
 	newCfg, err := NewConfig(ctx, creds, c.cfg.Region, src)
 	newCfg.SetGraph(c.graph)
@@ -241,13 +245,14 @@ func (c *Config) UnmarshalJSON(bytes []byte) error {
 }
 
 func (c *Config) RefreshRole(ctx utils.Context) (*Config, error) {
-	node, err := c.graph.GetNode(c.Arn())
-	if err != nil {
-		return nil, fmt.Errorf("RefreshingState(): %w", err)
+	node, ok := c.graph.GetNode(c.Arn())
+	if !ok {
+		return nil, fmt.Errorf("unable to find node for %s", c.Arn())
 	}
 
 	var cfg *Config
 	for _, src := range node.Inbound() {
+		var err error
 		cfg, err = src.Value().Assume(ctx, c.Arn())
 		if err == nil {
 			break
@@ -364,4 +369,18 @@ func NewTestAssumesAllConfig(srcType SourceType, name string, g *graph.Graph[*Co
 		}, nil
 	}
 	return cfg, nil
+}
+
+func (c *Config) IdentityPath() []string {
+	source := c.source
+	path := []string{c.Arn()}
+	for {
+		if source.Source == nil {
+			break
+		}
+
+		path = append([]string{source.Arn}, path...)
+		source = *source.Source
+	}
+	return path
 }

@@ -2,7 +2,6 @@ package graph
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 type Value interface {
@@ -76,8 +75,7 @@ func (g *Graph[T]) Nodes() map[string]Node[T] {
 
 // AddNode adds a new node with the given key to the graph if it doesn't already exist.
 //
-// The method returns a bool indicating whether the node with the given key is new. If it is new, true is returned, if
-// it is a duplicate false is returned.
+// The method returns a Node value if the ID is new, otherwise nil is returned.
 func (g *Graph[T]) AddNode(n T) *node[T] {
 	if _, ok := g.nodes[n.ID()]; ok {
 		return nil
@@ -97,22 +95,25 @@ func (g *Graph[T]) AddNode(n T) *node[T] {
 }
 
 // GetNode returns the Node represented by type T
-func (g *Graph[T]) GetNode(k string) (Node[T], error) {
+func (g *Graph[T]) GetNode(k string) (Node[T], bool) {
 	g.m.Lock()
 	defer g.m.Unlock()
 
 	node, ok := g.nodes[k]
 	if !ok {
-		return node, fmt.Errorf("the graph node with key '%v' does not exist\n", k)
+		return node, false
 	}
 
-	return node, nil
+	return node, true
 }
 
 // getNode returns the node (the struct, not the interface) represented by type T
-func (g *Graph[T]) getNode(k string) (*node[T], error) {
-	n, err := g.GetNode(k)
-	return n.(*node[T]), err
+func (g *Graph[T]) getNode(k string) (*node[T], bool) {
+	n, ok := g.GetNode(k)
+	if !ok {
+		return nil, false
+	}
+	return n.(*node[T]), ok
 }
 
 type JsonNode[T Value] struct {

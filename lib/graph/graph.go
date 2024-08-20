@@ -1,11 +1,15 @@
 package graph
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/RyanJarv/liquidswards/lib/utils"
+	"github.com/goccy/go-graphviz"
+	"github.com/goccy/go-graphviz/cgraph"
 	"io/fs"
-	"io/ioutil"
+	"log"
+	"os"
 	"sync"
 )
 
@@ -30,13 +34,13 @@ func (g *Graph[T]) AddEdge(k1, k2 T) {
 		return
 	}
 
-	n1, err := g.getNode(k1.ID())
-	if err != nil {
+	n1, ok := g.getNode(k1.ID())
+	if !ok {
 		n1 = g.AddNode(k1)
 	}
 
-	n2, err := g.getNode(k2.ID())
-	if err != nil {
+	n2, ok := g.getNode(k2.ID())
+	if !ok {
 		n2 = g.AddNode(k2)
 	}
 
@@ -52,9 +56,9 @@ func (g *Graph[T]) AddEdge(k1, k2 T) {
 
 // DFS runs a depth first search on the graph
 func (g *Graph[T]) DFS(ctx utils.Context, start string, visited map[string]bool, path []Node[T], visitCb func(Node[T], []Node[T]), last bool) {
-	startNode, err := g.getNode(start)
-	if err != nil {
-		ctx.Error.Println(err)
+	startNode, ok := g.getNode(start)
+	if !ok {
+		ctx.Error.Println("DFS(): the graph node with key '%v' does not exist\n", start)
 		return
 	}
 
@@ -119,19 +123,17 @@ func (g *Graph[T]) fillNodes(obj map[string]*node[T]) error {
 
 	for name, n := range obj {
 		for k, _ := range n.Outbound() {
-			node, err := g.GetNode(k)
-
-			if err != nil {
-				return err
+			node, ok := g.GetNode(k)
+			if !ok {
+				return fmt.Errorf("fillNodes(): the graph node with key '%v' does not exist\n", k)
 			}
 			n.assumes[k] = node
 		}
 
 		for k, _ := range n.Inbound() {
-			node, err := g.GetNode(k)
-
-			if err != nil {
-				return err
+			node, ok := g.GetNode(k)
+			if !ok {
+				return fmt.Errorf("fillNodes(): the graph node with key '%v' does not exist\n", k)
 			}
 			n.assumedBy[k] = node
 		}
@@ -142,7 +144,7 @@ func (g *Graph[T]) fillNodes(obj map[string]*node[T]) error {
 
 func (g *Graph[T]) Load(path string) error {
 	path = utils.Must(utils.ExpandPath(path))
-	file, err := ioutil.ReadFile(path)
+	file, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("Load(): %w", err)
 	}
@@ -159,9 +161,115 @@ func (g *Graph[T]) Load(path string) error {
 }
 
 func (g *Graph[T]) Save(path string) error {
-	bytes, err := g.MarshalJSON()
+	b, err := g.MarshalJSON()
 	if err != nil {
 		return fmt.Errorf("Error(): %w", err)
 	}
-	return ioutil.WriteFile(path, bytes, fs.FileMode(0o600))
+	return os.WriteFile(path, b, fs.FileMode(0o600))
+}
+
+func (g *Graph[T]) PrintGraph(ctx utils.Context, nodes []T) error {
+	fmt.Println(utils.Green.Color("\nAccessed:"))
+	for _, cfg := range nodes {
+		g.DFS(ctx, cfg.ID(), nil, []Node[T]{}, func(node Node[T], path []Node[T]) {
+			fmt.Printf("\n")
+			for i := 0; i < len(path); i++ {
+				fmt.Printf("\t")
+			}
+			if len(path) == 0 {
+				fmt.Printf(" "+utils.Cyan.Color("*")+" %s", node.Value().ID())
+			} else {
+				fmt.Printf(utils.Cyan.Color("->")+" %s", node.Value().ID())
+			}
+		}, false)
+	}
+	fmt.Printf("\n")
+	return nil
+}
+
+func (g *Graph[T]) SaveDiagram(ctx utils.Context, nodes []T, path string) error {
+	graph := graphviz.New()
+	gviz, err := graph.Graph()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := gviz.Close(); err != nil {
+			log.Fatal(err)
+		}
+		utils.Must0(graph.Close())
+	}()
+	gviz.SetRankDir("LR")
+
+	color := utils.ColorFromArn()
+
+	fmt.Println(utils.Green.Color("\nGraphViz:"))
+	for _, cfg := range nodes {
+		conv := map[string]*cgraph.Node{}
+
+		g.DFS(ctx, cfg.ID(), nil, []Node[T]{}, func(node Node[T], path []Node[T]) {
+			n1, ok := g.GetNode(node.Value().ID())
+			if !ok {
+				ctx.Error.Println("SaveDiagram(): the graph node with key '%v' does not exist\n", node.Value().ID())
+				return
+			}
+
+			g1, ok := conv[n1.Value().ID()]
+			if !ok {
+				g1, err = gviz.CreateNode(n1.Value().ID())
+				if err != nil {
+					log.Fatal(err)
+				}
+				g1.SetColor(color.Get(n1.Value().ID()))
+				g1.SetStyle("filled")
+				conv[n1.Value().ID()] = g1
+			}
+
+			for _, edge := range n1.Outbound() {
+				n2Id := edge.Value().ID()
+
+				g2, ok := conv[n2Id]
+				if !ok {
+					g2, err = gviz.CreateNode(n2Id)
+					if err != nil {
+						log.Fatal(err)
+					}
+					g2.SetColor(color.Get(n2Id))
+					g2.SetStyle("filled")
+					conv[n2Id] = g2
+				}
+
+				e1, err := gviz.CreateEdge(fmt.Sprintf("%s-%s", n1.Value().ID(), n2Id), g1, g2)
+				if err != nil {
+					log.Fatal(err)
+				}
+				e1.SetDir("forward")
+			}
+
+		}, false)
+	}
+
+	var buf bytes.Buffer
+	if err := graph.Render(gviz, "dot", &buf); err != nil {
+		log.Fatal(err)
+	}
+
+	err = os.WriteFile(path, buf.Bytes(), fs.FileMode(0640))
+	if err != nil {
+		return fmt.Errorf("failed writing graphviz output to %s: %w", path, err)
+	}
+	return nil
+}
+
+func (g *Graph[T]) Report(ctx utils.Context, nodes []T, path string) error {
+	err := g.PrintGraph(ctx, nodes)
+	if err != nil {
+		return fmt.Errorf("printing results: %w", err)
+	}
+
+	err = g.SaveDiagram(ctx, nodes, path)
+	if err != nil {
+		ctx.Error.Printf("generating graphviz Graph failed: %l\n", err)
+	}
+	return nil
 }

@@ -1,6 +1,6 @@
 module github.com/RyanJarv/liquidswards
 
-go 1.18
+go 1.22
 
 require (
 	github.com/RyanJarv/lq v0.0.0-20220205091533-22a9e80d3567
@@ -15,7 +15,8 @@ require (
 	github.com/aws/smithy-go v1.10.0
 	github.com/dlsniper/debugger v0.6.0
 	github.com/go-test/deep v1.0.8
-	github.com/goccy/go-graphviz v0.0.9
+	github.com/goccy/go-graphviz v0.1.3
+	github.com/golang/mock v1.6.0
 	github.com/google/go-cmp v0.5.7
 )
 
@@ -29,5 +30,5 @@ require (
 	github.com/fogleman/gg v1.3.0 // indirect
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	golang.org/x/image v0.0.0-20200119044424-58c23975cae1 // indirect
+	golang.org/x/image v0.14.0 // indirect
 )
