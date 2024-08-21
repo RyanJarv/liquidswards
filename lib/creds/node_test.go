@@ -6,35 +6,34 @@ import (
 	"fmt"
 	"github.com/RyanJarv/liquidswards/lib/graph"
 	"github.com/RyanJarv/liquidswards/lib/utils"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/google/go-cmp/cmp"
 	"testing"
 )
 
 var jsonNodeBytes = []byte(`{
   "Value": {
-    "Arn": "arn:aws:iam::123456789012:role/test",
+    "Arn": "Arn:aws:iam::123456789012:role/test",
     "State": 0,
     "Region": "us-east-1",
     "Credentials": {
       "AccessKeyID": "test",
       "SecretAccessKey": "test",
       "SessionToken": "",
-      "Source": "arn:aws:iam::123456789012:role/test",
+      "Identity": "Arn:aws:iam::123456789012:role/test",
       "CanExpire": false,
       "Expires": "0001-01-01T00:00:00Z"
     },
-    "Source": {
+    "Identity": {
       "Type": 0,
       "Name": "test",
-      "Arn": "arn:aws:iam::123456789012:role/test"
+      "Arn": "Arn:aws:iam::123456789012:role/test"
     }
   },
   "Assumes": [
-    "arn:aws:iam::123456789012:role/test"
+    "Arn:aws:iam::123456789012:role/test"
   ],
   "AssumedBy": [
-    "arn:aws:iam::123456789012:role/test"
+    "Arn:aws:iam::123456789012:role/test"
   ]
 }`)
 
@@ -77,21 +76,11 @@ func TestNode_Load(t *testing.T) {
 
 func NewNode() (graph.Node[*Config], error) {
 	ctx = utils.NewContext(context.Background())
-	cfg, err := NewConfig(
-		ctx,
-		aws.Credentials{
-			AccessKeyID:     "test",
-			SecretAccessKey: "test",
-			Source:          "test",
-			CanExpire:       false,
-		},
-		"us-east-1",
-		Source{
-			Type: SourceProfile,
-			Name: "test",
-			Arn:  "arn:aws:iam::123456789012:role/test",
-		},
-	)
+	cfg, err := NewConfig(ctx, "us-east-1", Identity{
+		Type: SourceProfile,
+		Name: "test",
+		Arn:  "Arn:aws:iam::123456789012:role/test",
+	})
 
 	if err != nil {
 		return nil, fmt.Errorf("creating cfg %s", err)

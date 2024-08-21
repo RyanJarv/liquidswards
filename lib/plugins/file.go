@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"github.com/RyanJarv/liquidswards/lib/types"
 	"github.com/RyanJarv/liquidswards/lib/utils"
@@ -11,7 +12,7 @@ import (
 	"sync"
 )
 
-var file = utils.PluginArgs.String("file", "", "A file containing a list of additional file to enumerate.")
+var file = flag.String("file", "", "A file containing a list of additional file to enumerate.")
 
 type NewFilePluginInput struct {
 	types.GlobalPluginArgs

@@ -11,10 +11,8 @@ import (
 	"github.com/RyanJarv/liquidswards/lib/utils"
 	"github.com/alitto/pond"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 const MaxWorkers = 100
@@ -32,7 +30,7 @@ always in scope regardless of this value.
 Disable scope, all discovered role ARN's belonging to ANY account will be enumerated for access and additional file 
 recursively.
 `)
-	profilesStr = flag.String("profiles", "", "List of AWS profiles (seperated by commas)")
+	profilesStr = flag.String("profiles", "default", "List of AWS profiles (seperated by commas)")
 	name        = flag.String("name", "default", "Name of environment, used to store and retrieve graphs.")
 	noSave      = flag.Bool("no-save", false, "Do not save scan results to disk.")
 	load        = flag.Bool("load", false, "Load results from previous scans.")
@@ -73,8 +71,6 @@ func main() {
 		w := flag.CommandLine.Output()
 		utils.Must(fmt.Fprintf(w, "Main arguments:\n"))
 		flag.PrintDefaults()
-		utils.Must(fmt.Fprintf(w, "Plugin arguments:\n"))
-		utils.PluginArgs.PrintDefaults()
 		utils.Must(fmt.Fprintf(w, "About liquidswards:\n"))
 		utils.Must(fmt.Fprintf(w, help))
 	}
@@ -86,15 +82,14 @@ func main() {
 	}
 
 	if *region != "" {
-		ctx.Debug.Printf("using region %s\n", region)
+		ctx.Debug.Printf("using region %s\n", *region)
 	}
 
 	if len(flag.Args()) > 1 {
 		ctx.Error.Fatalln("extra arguments detected, did you mean to pass a comma seperated list to -profiles instead?")
 	}
 
-	err := Run()
-	if err != nil {
+	if err := Run(); err != nil {
 		ctx.Error.Fatalln(err)
 	}
 
@@ -102,6 +97,22 @@ func main() {
 
 func Run() error {
 	graph := graph.NewDirectedGraph[*creds.Config]()
+
+	programDir := utils.Must(GetProgramDir(*name))
+	graphPath := filepath.Join(programDir, "nodes.json")
+
+	if *load {
+		if err := graph.Load(graphPath); err != nil {
+			return fmt.Errorf("error loading graph: %w", err)
+		}
+	}
+
+	if len(flag.Args()) == 1 {
+		if err := graph.Load(graphPath); err != nil {
+			return fmt.Errorf("error loading graph: %w", err)
+		}
+		return PrintCreds(graph, flag.Args()[0])
+	}
 
 	// TODO: Move to assumeroles?
 	cfgs, err := creds.ParseProfiles(ctx, *profilesStr, *region, graph)
@@ -130,22 +141,12 @@ func Run() error {
 		Access:           utils.NewIterator[*creds.Config](),
 		Graph:            graph,
 		Scope:            scope,
-		ProgramDir:       utils.Must(GetProgramDir()),
-		PrimaryAwsConfig: cfgs[0].Config(),
+		ProgramDir:       programDir,
+		PrimaryAwsConfig: cfgs[0].Config,
 		AwsConfigs:       cfgs,
 	}
 
-	graphPath := filepath.Join(args.ProgramDir, "nodes.json")
-	if *load {
-		if err := graph.Load(graphPath); err != nil {
-			return fmt.Errorf("error loading graph: %w", err)
-		}
-	}
-
-	if len(flag.Args()) == 1 {
-		return PrintCreds(graph, flag.Args()[0])
-	}
-
+	var waitable []types.Waitable
 	// Plugins typically get run when a role is discovered, if the scan is skipped we need to trigger them here.
 	for _, plugin := range allPlugins {
 		p := plugin(scanCtx, args)
@@ -153,13 +154,22 @@ func Run() error {
 		if enabled, reason := p.Enabled(); enabled {
 			ctx.Info.Printf("plugin %s is enabled: %s\n", p.Name(), reason)
 			p.Run(ctx)
+
+			if w, ok := p.(types.Waitable); ok {
+				waitable = append(waitable, w)
+			}
 		} else {
 			ctx.Info.Printf("plugin %s is disabled: %s\n", p.Name(), reason)
 		}
 	}
 
 	for _, cfg := range cfgs {
+		args.FoundRoles.Add(types.NewRole(cfg.Arn()))
 		args.Access.Add(cfg)
+	}
+
+	for _, w := range waitable {
+		w.Wait()
 	}
 
 	if !*noSave {
@@ -193,7 +203,8 @@ func PrintCreds(g *graph.Graph[*creds.Config], arn string) error {
 		return fmt.Errorf("role %s not found in graph", arn)
 	}
 
-	creds, err := node.Value().Config().Credentials.Retrieve(ctx)
+	cfg := node.Value()
+	creds, err := cfg.Credentials.Retrieve(ctx)
 	if err != nil {
 		return fmt.Errorf("error retrieving credentials: %w", err)
 	}
@@ -204,7 +215,7 @@ func PrintCreds(g *graph.Graph[*creds.Config], arn string) error {
 	return nil
 }
 
-func GetProgramDir() (string, error) {
+func GetProgramDir(name string) (string, error) {
 	path, err := utils.ExpandPath(fmt.Sprintf("~/.liquidswards/%s", name))
 	if err != nil {
 		ctx.Error.Fatalln("failed to expand path: %w", err)
@@ -218,9 +229,7 @@ func GetProgramDir() (string, error) {
 }
 
 func ScanContext(ctx utils.Context) utils.Context {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-
+	sigs := utils.SigTermChan()
 	scanCtx, cancelScan := ctx.WithCancel()
 	go func() {
 		<-sigs

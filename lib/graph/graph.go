@@ -30,27 +30,27 @@ type Graph[T Value] struct {
 // The AddEdge method adds an edge between two vertices in the graph
 func (g *Graph[T]) AddEdge(k1, k2 T) {
 	// Avoid self-cycles
-	if k1.ID() == k2.ID() {
+	if k1.Id() == k2.Id() {
 		return
 	}
 
-	n1, ok := g.getNode(k1.ID())
+	n1, ok := g.getNode(k1.Id())
 	if !ok {
 		n1 = g.AddNode(k1)
 	}
 
-	n2, ok := g.getNode(k2.ID())
+	n2, ok := g.getNode(k2.Id())
 	if !ok {
 		n2 = g.AddNode(k2)
 	}
 
 	g.m.Lock()
-	n1.assumes[n2.value.ID()] = n2
-	n2.assumedBy[n1.value.ID()] = n1
+	n1.assumes[n2.value.Id()] = n2
+	n2.assumedBy[n1.value.Id()] = n1
 
 	// Add the vertices to the graph's node map
-	g.nodes[n1.value.ID()] = n1
-	g.nodes[n2.value.ID()] = n2
+	g.nodes[n1.value.Id()] = n1
+	g.nodes[n2.value.Id()] = n2
 	g.m.Unlock()
 }
 
@@ -58,7 +58,7 @@ func (g *Graph[T]) AddEdge(k1, k2 T) {
 func (g *Graph[T]) DFS(ctx utils.Context, start string, visited map[string]bool, path []Node[T], visitCb func(Node[T], []Node[T]), last bool) {
 	startNode, ok := g.getNode(start)
 	if !ok {
-		ctx.Error.Println("DFS(): the graph node with key '%v' does not exist\n", start)
+		ctx.Error.Printf("DFS(): the graph node with key '%v' does not exist", start)
 		return
 	}
 
@@ -85,10 +85,10 @@ func (g *Graph[T]) DFS(ctx utils.Context, start string, visited map[string]bool,
 		default:
 			if last {
 				continue
-			} else if newVisited[v.Value().ID()] {
-				g.DFS(ctx, v.Value().ID(), newVisited, path, visitCb, true)
+			} else if newVisited[v.Value().Id()] {
+				g.DFS(ctx, v.Value().Id(), newVisited, path, visitCb, true)
 			} else {
-				g.DFS(ctx, v.Value().ID(), newVisited, path, visitCb, false)
+				g.DFS(ctx, v.Value().Id(), newVisited, path, visitCb, false)
 			}
 		}
 	}
@@ -171,15 +171,15 @@ func (g *Graph[T]) Save(path string) error {
 func (g *Graph[T]) PrintGraph(ctx utils.Context, nodes []T) error {
 	fmt.Println(utils.Green.Color("\nAccessed:"))
 	for _, cfg := range nodes {
-		g.DFS(ctx, cfg.ID(), nil, []Node[T]{}, func(node Node[T], path []Node[T]) {
+		g.DFS(ctx, cfg.Id(), nil, []Node[T]{}, func(node Node[T], path []Node[T]) {
 			fmt.Printf("\n")
 			for i := 0; i < len(path); i++ {
 				fmt.Printf("\t")
 			}
 			if len(path) == 0 {
-				fmt.Printf(" "+utils.Cyan.Color("*")+" %s", node.Value().ID())
+				fmt.Printf(" "+utils.Cyan.Color("*")+" %s", node.Value().Id())
 			} else {
-				fmt.Printf(utils.Cyan.Color("->")+" %s", node.Value().ID())
+				fmt.Printf(utils.Cyan.Color("->")+" %s", node.Value().Id())
 			}
 		}, false)
 	}
@@ -207,26 +207,26 @@ func (g *Graph[T]) SaveDiagram(ctx utils.Context, nodes []T, path string) error 
 	for _, cfg := range nodes {
 		conv := map[string]*cgraph.Node{}
 
-		g.DFS(ctx, cfg.ID(), nil, []Node[T]{}, func(node Node[T], path []Node[T]) {
-			n1, ok := g.GetNode(node.Value().ID())
+		g.DFS(ctx, cfg.Id(), nil, []Node[T]{}, func(node Node[T], path []Node[T]) {
+			n1, ok := g.GetNode(node.Value().Id())
 			if !ok {
-				ctx.Error.Println("SaveDiagram(): the graph node with key '%v' does not exist\n", node.Value().ID())
+				ctx.Error.Println("SaveDiagram(): the graph node with key '%v' does not exist\n", node.Value().Id())
 				return
 			}
 
-			g1, ok := conv[n1.Value().ID()]
+			g1, ok := conv[n1.Value().Id()]
 			if !ok {
-				g1, err = gviz.CreateNode(n1.Value().ID())
+				g1, err = gviz.CreateNode(n1.Value().Id())
 				if err != nil {
 					log.Fatal(err)
 				}
-				g1.SetColor(color.Get(n1.Value().ID()))
+				g1.SetColor(color.Get(n1.Value().Id()))
 				g1.SetStyle("filled")
-				conv[n1.Value().ID()] = g1
+				conv[n1.Value().Id()] = g1
 			}
 
 			for _, edge := range n1.Outbound() {
-				n2Id := edge.Value().ID()
+				n2Id := edge.Value().Id()
 
 				g2, ok := conv[n2Id]
 				if !ok {
@@ -239,7 +239,7 @@ func (g *Graph[T]) SaveDiagram(ctx utils.Context, nodes []T, path string) error 
 					conv[n2Id] = g2
 				}
 
-				e1, err := gviz.CreateEdge(fmt.Sprintf("%s-%s", n1.Value().ID(), n2Id), g1, g2)
+				e1, err := gviz.CreateEdge(fmt.Sprintf("%s-%s", n1.Value().Id(), n2Id), g1, g2)
 				if err != nil {
 					log.Fatal(err)
 				}

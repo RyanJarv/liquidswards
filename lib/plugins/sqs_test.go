@@ -137,7 +137,7 @@ func TestAccess_Full(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	target, err := source.Assume(ctx, "arn:aws:iam::123456789012:role/target")
+	target, err := source.Assume(ctx, "arn:aws:iam::123456789012:role/target", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

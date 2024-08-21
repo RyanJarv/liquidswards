@@ -13,17 +13,21 @@ import (
 
 var (
 	cfg = &Config{
-		source: Source{
+		Identity: Identity{
 			Type: SourceAssumeRole,
 			Name: "arn:aws:iam::123456789012:user/test",
 			Arn:  "arn:aws:iam::123456789012:user/test",
+			//Source: &Identity{
+			//	Type: SourceProfile,
+			//	Name: "test",
+			//	Arn:  "arn:aws:iam::123456789012:user/source",
+			//},
 		},
-		cfg: aws.Config{Credentials: credentials.NewStaticCredentialsProvider(
+		Config: aws.Config{Credentials: credentials.NewStaticCredentialsProvider(
 			"accesskey",
 			"secretaccesskey",
 			"sessiontoken",
 		)},
-		state: ActiveState,
 	}
 )
 
@@ -41,7 +45,7 @@ var transformJSON = cmp.FilterValues(
 
 func TestGraph_AddNode(t *testing.T) {
 	g := graph.NewDirectedGraph[*Config]()
-	cfg := utils.Must(NewTestAssumesAllConfig(SourceProfile, "user/profile-a-arn", g))
+	cfg, _ := utils.Must2(NewTestAssumesAllConfig(SourceProfile, "user/profile-a-arn", g))
 
 	if g.AddNode(cfg) == nil {
 		t.Error("g.AddNode returned false, expected true")
@@ -65,7 +69,7 @@ func TestGraph_AddNode(t *testing.T) {
 	}
 
 	if got := node.Value().Arn(); got != want {
-		t.Errorf("config arn: got %s, want: %s", got, want)
+		t.Errorf("config Arn: got %s, want: %s", got, want)
 	}
 
 }
@@ -91,21 +95,22 @@ func TestGraph_SaveNode(t *testing.T) {
       "AccessKeyID": "accesskey",
       "SecretAccessKey": "secretaccesskey",
       "SessionToken": "sessiontoken",
-      "Source": "StaticCredentials",
+	  "Source": "StaticCredentials",
       "CanExpire": false,
       "Expires": "0001-01-01T00:00:00Z"
     },
-    "Source": {
+    "Identity": {
       "Type": 1,
       "Name": "arn:aws:iam::123456789012:user/test",
-      "Arn": "arn:aws:iam::123456789012:user/test"
+      "Arn": "arn:aws:iam::123456789012:user/test",
+      "Source": null
     }
   },
   "Assumes": null,
   "AssumedBy": null
 }`)
 	if diff := cmp.Diff(got, want, transformJSON); diff != "" {
-		t.Error(diff)
+		t.Errorf("node: (-got +want)\n%s", diff)
 	}
 }
 
@@ -119,11 +124,11 @@ var JsonBytes = []byte(`{
         "AccessKeyID": "test",
         "SecretAccessKey": "test",
         "SessionToken": "test",
-        "Source": "arn:aws:iam::123456789012:user/test",
+        "Identity": "arn:aws:iam::123456789012:user/test",
         "CanExpire": true,
         "Expires": "2022-05-25T17:00:00-07:00"
       },
-      "Source": {
+      "Identity": {
         "Type": 1,
         "Name": "arn:aws:iam::123456789012:user/test",
         "Arn": "arn:aws:iam::123456789012:user/test"
@@ -145,11 +150,11 @@ var JsonBytes = []byte(`{
         "AccessKeyID": "test",
         "SecretAccessKey": "test",
         "SessionToken": "test",
-        "Source": "arn:aws:iam::123456789012:user/test",
+        "Identity": "arn:aws:iam::123456789012:user/test",
         "CanExpire": false,
         "Expires": "0001-01-01T00:00:00Z"
       },
-      "Source": {
+      "Identity": {
         "Type": 1,
         "Name": "arn:aws:iam::123456789012:user/test",
         "Arn": "arn:aws:iam::123456789012:user/test"
@@ -175,11 +180,11 @@ func TestGraph_Save(t *testing.T) {
         "AccessKeyID": "test",
         "SecretAccessKey": "test",
         "SessionToken": "test",
-        "Source": "arn:aws:iam::123456789012:user/test",
+        "Identity": "arn:aws:iam::123456789012:user/test",
         "CanExpire": true,
         "Expires": "2022-05-25T17:00:00-07:00"
       },
-      "Source": {
+      "Identity": {
         "Type": 1,
         "Name": "arn:aws:iam::123456789012:role/test",
         "Arn": "arn:aws:iam::123456789012:role/test"
@@ -201,11 +206,11 @@ func TestGraph_Save(t *testing.T) {
         "AccessKeyID": "test",
         "SecretAccessKey": "test",
         "SessionToken": "test",
-        "Source": "arn:aws:iam::123456789012:user/test",
+        "Identity": "arn:aws:iam::123456789012:user/test",
         "CanExpire": false,
         "Expires": "0001-01-01T00:00:00Z"
       },
-      "Source": {
+      "Identity": {
         "Type": 1,
         "Name": "arn:aws:iam::123456789012:user/test",
         "Arn": "arn:aws:iam::123456789012:user/test"
@@ -244,14 +249,15 @@ func TestGraph_Load(t *testing.T) {
         "AccessKeyID": "test",
         "SecretAccessKey": "test",
         "SessionToken": "test",
-        "Source": "arn:aws:iam::123456789012:user/test",
         "CanExpire": false,
-        "Expires": "0001-01-01T00:00:00Z"
+        "Expires": "0001-01-01T00:00:00Z",
+        "Source": "StaticCredentials"
       },
-      "Source": {
+      "Identity": {
         "Type": 1,
         "Name": "arn:aws:iam::123456789012:user/test",
-        "Arn": "arn:aws:iam::123456789012:user/test"
+        "Arn": "arn:aws:iam::123456789012:user/test",
+		"Source": null
       }
     },
     "Assumes": [
@@ -281,21 +287,18 @@ func TestGraph_Load(t *testing.T) {
 
 func NewFilledGraph(t *testing.T) (*graph.Graph[*Config], error) {
 	g := graph.NewDirectedGraph[*Config]()
-	source, err := NewTestAssumesAllConfig(SourceAssumeRole, "user/test", g)
-	if err != nil {
-		t.Fatal(err)
-	}
+	source, _ := utils.Must2(NewTestAssumesAllConfig(SourceAssumeRole, "user/test", g))
 
 	target, err := source.Assume(ctx, "arn:aws:iam::123456789012:role/test")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if g.AddNode(source) == nil {
-		t.Error("g.AddNode returned false, expected true")
+	if g.AddNode(source) != nil {
+		t.Error("g.AddNode returned unexpected nil")
 	}
-	if g.AddNode(target) == nil {
-		t.Error("g.AddNode returned false, expected true")
+	if g.AddNode(target) != nil {
+		t.Error("g.AddNode returned unexpected nil")
 	}
 
 	g.AddEdge(source, target)
@@ -305,10 +308,7 @@ func NewFilledGraph(t *testing.T) (*graph.Graph[*Config], error) {
 
 func TestGraph_SaveCyclic(t *testing.T) {
 	g := graph.NewDirectedGraph[*Config]()
-	source, err := NewTestAssumesAllConfig(SourceAssumeRole, "user/test", g)
-	if err != nil {
-		t.Fatal(err)
-	}
+	source, _ := utils.Must2(NewTestAssumesAllConfig(SourceAssumeRole, "user/test", g))
 
 	if g.AddNode(source) == nil {
 		t.Error("g.AddNode returned false, expected true")

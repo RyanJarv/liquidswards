@@ -7,71 +7,46 @@ import (
 	"github.com/RyanJarv/liquidswards/lib/graph"
 	"github.com/RyanJarv/liquidswards/lib/utils"
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"testing"
 )
 
 var ctx = utils.NewContext(context.Background())
 
-func TestConfig_Assume(t *testing.T) {
-	ctx := utils.NewContext(context.Background())
-	g := graph.NewDirectedGraph[*Config]()
-	source, err := NewTestAssumesAllConfig(SourceProfile, "user/profile-a", g)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	devops, err := source.Assume(ctx, "arn:aws:iam::123456789012:user/test") // Just needs to parse
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if want := "arn:aws:iam::123456789012:user/profile-a"; source.Arn() != want {
-		t.Errorf("source.Arn(): got %s, want %s", source.Arn(), want)
-	}
-
-	if want := "arn:aws:iam::123456789012:user/test"; devops.Arn() != want {
-		t.Errorf("got %s want %s", devops.Arn(), want)
-	}
-
-	if want := ActiveState; devops.State() != ActiveState {
-		t.Errorf("got %q want %q", devops.State(), want)
-	}
-
-	got, err := devops.Config().Credentials.Retrieve(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	want := utils.NewTestCreds(true, "arn:aws:iam::123456789012:user/profile-a")
-	if msg := cmp.Diff(got, want); msg != "" {
-		t.Errorf(msg)
-	}
-}
-
+// TestConfig_Assume ensures that refreshing a target calls AssumeRole on the source.
 func TestConfig_Refresh(t *testing.T) {
+	wantSourceAssumeCalls := []sts.AssumeRoleInput{
+		{
+			RoleArn:         aws.String("arn:aws:iam::123456789012:role/target"),
+			RoleSessionName: aws.String("liquidswards"),
+			DurationSeconds: aws.Int32(900),
+		},
+	}
+
 	g := graph.NewDirectedGraph[*Config]()
-	sourceCfg := utils.Must(NewTestAssumesAllConfig(SourceProfile, "user/profile-a-arn", g))
-	expiredCfg := utils.Must(NewTestAssumesAllConfig(SourceAssumeRole, "role/target-profile-arn", g))
+	sourceCfg, sourceClient := utils.Must2(NewTestAssumesAllConfig(SourceProfile, "user/source", g))
+	targetCfg, _ := utils.Must2(NewTestAssumesAllConfig(SourceAssumeRole, "role/target", g))
 
 	g.AddNode(sourceCfg)
-	g.AddNode(expiredCfg)
-	g.AddEdge(sourceCfg, expiredCfg)
+	g.AddNode(targetCfg)
+	g.AddEdge(sourceCfg, targetCfg)
 
-	refreshedCfg, err := expiredCfg.Refresh(ctx)
+	gotCreds, err := targetCfg.Refresh(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := refreshedCfg.Config().Credentials.Retrieve(ctx)
-	if err != nil {
-		t.Fatal(err)
+	wantCreds := utils.NewTestCreds(true, "AssumeRoleProvider")
+	if msg := cmp.Diff(gotCreds, wantCreds); msg != "" {
+		t.Errorf("target Refresh() creds mismatch (-got +want):\n%s", msg)
 	}
 
-	want := utils.NewTestCreds(true, "arn:aws:iam::123456789012:user/profile-a-arn")
-	if msg := cmp.Diff(want, got); msg != "" {
-		t.Errorf(msg)
+	if msg := cmp.Diff(sourceClient.Calls, wantSourceAssumeCalls, cmp.Options{
+		cmpopts.IgnoreUnexported(sts.AssumeRoleInput{}),
+	}); msg != "" {
+		t.Errorf("source AssumeRole() call mismatch (-got +want):\n%s", msg)
 	}
 }
 
@@ -84,11 +59,11 @@ var configJson = bytes.Trim([]byte(`
     "AccessKeyID": "test",
     "SecretAccessKey": "test",
     "SessionToken": "test",
-    "Source": "arn:aws:iam::123456789012:user/test",
+    "Identity": "arn:aws:iam::123456789012:user/test",
     "CanExpire": false,
     "Expires": "0001-01-01T00:00:00Z"
   },
-  "Source": {
+  "Identity": {
     "Type": 1,
     "Name": "arn:aws:iam::123456789012:user/test",
     "Arn": "arn:aws:iam::123456789012:user/test"
@@ -98,20 +73,11 @@ var configJson = bytes.Trim([]byte(`
 
 func TestConfig_Marshal(t *testing.T) {
 	cfg := &Config{
-		source: Source{
+		Identity: Identity{
 			Type: SourceAssumeRole,
 			Name: "arn:aws:iam::123456789012:user/test",
 			Arn:  "arn:aws:iam::123456789012:user/test",
 		},
-		cfg: aws.Config{Credentials: credentials.StaticCredentialsProvider{
-			Value: aws.Credentials{
-				AccessKeyID:     "test",
-				SecretAccessKey: "test",
-				SessionToken:    "test",
-				Source:          "arn:aws:iam::123456789012:user/test",
-			},
-		}},
-		state: ActiveState,
 	}
 
 	got, err := json.MarshalIndent(cfg, "", "  ")
@@ -137,12 +103,12 @@ func TestConfig_Unmarshal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cfg.source.Arn == "" {
+	if cfg.Identity.Arn == "" {
 		t.Error("cfg.source.Arn is empty")
 	}
 
 	// TODO: Figure out why go-cmp isn't working here
 	if diff := cmp.Diff(got, configJson); diff != "" {
-		t.Error(diff)
+		t.Errorf("cfg mismatch (-got +want):\n%s", diff)
 	}
 }

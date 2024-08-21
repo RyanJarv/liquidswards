@@ -2,7 +2,6 @@ package utils
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"github.com/alitto/pond"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,16 +11,16 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 var Arrow = fmt.Sprintf(" %s ", Cyan.Color(" --assumes--> "))
-
-var PluginArgs = flag.NewFlagSet("plugin", flag.ExitOnError)
 
 const (
 	colorScheme = "pastel28"
@@ -194,6 +193,13 @@ func Must[T any](v T, err error) T {
 	return v
 }
 
+func Must2[T any, K any](v T, v2 K, err error) (T, K) {
+	if err != nil {
+		panic(err)
+	}
+	return v, v2
+}
+
 func Must0(err error) {
 	if err != nil {
 		panic(err)
@@ -294,7 +300,7 @@ func NewTestCreds(canExpire bool, source string) aws.Credentials {
 		SecretAccessKey: "test",
 		SessionToken:    "test",
 		CanExpire:       canExpire,
-		Expires:         time.Now().Round(time.Hour * 24 * 30),
+		Expires:         time.Time{},
 		Source:          source,
 	}
 }
@@ -312,3 +318,25 @@ type StsAssumeRoleAPI interface {
 }
 
 type AssumeRoleFunc = func(ctx context.Context, in *sts.AssumeRoleInput, optFns ...func(*sts.Options)) (*sts.AssumeRoleOutput, error)
+
+func SliceRepeats[T comparable](slice []T) bool {
+	elementMap := make(map[T]bool)
+
+	for _, element := range slice {
+		if _, exists := elementMap[element]; exists {
+			// Element is already in the map, so it's a repeat
+			return true
+		}
+		// Add the element to the map
+		elementMap[element] = true
+	}
+
+	// No repeats found
+	return false
+}
+
+func SigTermChan() chan os.Signal {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	return sigs
+}

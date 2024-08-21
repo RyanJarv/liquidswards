@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"flag"
 	"fmt"
 	"github.com/RyanJarv/liquidswards/lib/creds"
 	"github.com/RyanJarv/liquidswards/lib/types"
@@ -9,6 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"sync"
 )
+
+var noList = flag.Bool("no-list", false, "disable the list plugin")
 
 func NewList(_ utils.Context, args types.GlobalPluginArgs) types.Plugin {
 	return &List{
@@ -24,7 +27,11 @@ type List struct {
 
 func (l *List) Name() string { return "list" }
 func (l *List) Enabled() (bool, string) {
-	return true, "will call iam.ListRoles to discover roles"
+	if *noList {
+		return false, "listing iam roles is disabled because -no-list was used"
+	} else {
+		return true, "using iam.ListRoles to discover roles"
+	}
 }
 
 func (l *List) Run(ctx utils.Context) {
@@ -35,7 +42,7 @@ func (l *List) Run(ctx utils.Context) {
 		}
 		l.accountMap.Store(cfg.Account(), 1)
 
-		if err := ForEachRole(ctx, cfg.Config(), func(r types.Role) {
+		if err := ForEachRole(ctx, cfg.Config, func(r types.Role) {
 			if l.Scope != nil && !utils.ArnInScope(l.Scope, *r.Arn) {
 				ctx.Debug.Println("not in scope, skipping:", *r.Arn)
 				return

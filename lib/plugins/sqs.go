@@ -3,6 +3,7 @@ package plugins
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"github.com/RyanJarv/liquidswards/lib/creds"
 	"github.com/RyanJarv/liquidswards/lib/graph"
@@ -13,8 +14,8 @@ import (
 	sqsTypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
-var sqsQueue = utils.PluginArgs.String("sqs-queue", "", `
-SQS queue which receives IAM updates via CloudTrail/CloudWatch/EventBridge. If set, -access-refresh is not used and 
+var sqsQueue = flag.String("sqs-queue", "", `
+SQS queue which receives IAM updates via CloudTrail/CloudWatch/EventBridge. If set, -access-CredRefreshSeconds is not used and 
 access is only refreshed when the credentials are about to expire or access is revoked via the web console. 
 
 Currently, the first profile passed with -profiles is used to access the SQS queue. 
@@ -37,7 +38,7 @@ func NewSqs(ctx utils.Context, args types.GlobalPluginArgs) types.Plugin {
 type Sqs struct {
 	types.GlobalPluginArgs
 
-	// SqsQueue is an SQS queue that we assume is configured to receive IAM updates. This allows us to refresh
+	// SqsQueue is an SQS queue that we assume is configured to receive IAM updates. This allows us to CredRefreshSeconds
 	// credentials only when necessary. AccessRefresh is ignored when this is specified.
 	SqsQueue string
 	Path     string
@@ -50,7 +51,7 @@ func (a *Sqs) Name() string {
 
 func (a *Sqs) Enabled() (bool, string) {
 	if a.SqsQueue != "" {
-		return true, fmt.Sprintf("will refresh on revocation events from %s", a.SqsQueue)
+		return true, fmt.Sprintf("will CredRefreshSeconds on revocation events from %s", a.SqsQueue)
 	} else {
 		return false, "no -sqs-queue arg provided"
 	}
@@ -127,8 +128,10 @@ func handleCloudTrailMsg(ctx utils.Context, get GetNode, msg sqsTypes.Message) e
 			return fmt.Errorf("sqs: no config found for %s", arn)
 		}
 
-		if _, err := node.Value().Refresh(ctx); err != nil {
-			return fmt.Errorf("sqs: failed to refresh %s: %s", arn, err)
+		if creds, err := node.Value().Refresh(ctx); err != nil {
+			return fmt.Errorf("sqs: failed to CredRefreshSeconds %s: %s", arn, err)
+		} else {
+			ctx.Info.Printf("refreshed %s -- %s", arn, creds.AccessKeyID)
 		}
 	}
 	return nil

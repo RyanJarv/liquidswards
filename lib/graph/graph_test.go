@@ -8,7 +8,7 @@ import (
 
 type V struct{}
 
-func (v V) ID() string                       { return "test" }
+func (v V) Id() string                       { return "test" }
 func (v V) SetGraph(_ interface{})           { return }
 func (v V) UnmarshalJSON(bytes []byte) error { return nil }
 func (v V) MarshalJSON() ([]byte, error)     { return []byte{}, nil }

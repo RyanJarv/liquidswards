@@ -6,7 +6,7 @@ import (
 
 type Value interface {
 	json.Marshaler
-	ID() string
+	Id() string
 	SetGraph(graph interface{})
 }
 
@@ -45,10 +45,10 @@ func NewNode[T Value](in NewNodeInput[T]) Node[T] {
 		assumedBy: map[string]Node[T]{},
 	}
 	for _, n := range in.Assumes {
-		node.assumes[n.Value().ID()] = n
+		node.assumes[n.Value().Id()] = n
 	}
 	for _, n := range in.AssumedBy {
-		node.assumedBy[n.Value().ID()] = n
+		node.assumedBy[n.Value().Id()] = n
 	}
 	return node
 }
@@ -77,7 +77,7 @@ func (g *Graph[T]) Nodes() map[string]Node[T] {
 //
 // The method returns a Node value if the ID is new, otherwise nil is returned.
 func (g *Graph[T]) AddNode(n T) *node[T] {
-	if _, ok := g.nodes[n.ID()]; ok {
+	if _, ok := g.nodes[n.Id()]; ok {
 		return nil
 	}
 
@@ -88,7 +88,7 @@ func (g *Graph[T]) AddNode(n T) *node[T] {
 	}
 
 	g.m.Lock()
-	g.nodes[n.ID()] = v
+	g.nodes[n.Id()] = v
 	g.m.Unlock()
 
 	return v

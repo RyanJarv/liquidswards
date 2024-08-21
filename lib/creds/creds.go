@@ -9,9 +9,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go-v2/service/sts/types"
+	"slices"
 	"strings"
 	"time"
 )
@@ -27,15 +28,13 @@ const (
 type IConfig interface {
 	MarshalJSON() ([]byte, error)
 	UnmarshalJSON([]byte) error
-	ID() string
+	Id() string
 	Arn() string
 	Name() string
 	Account() string
 	Config() aws.Config
 	Assume(ctx utils.Context, arn string) (*Config, error)
-	State() State
 	Refresh(utils.Context) (*Config, error)
-	SetState(State)
 	SetGraph(graph interface{})
 }
 
@@ -46,37 +45,71 @@ const (
 	SourceAssumeRole
 )
 
-type Source struct {
+type Identity struct {
 	Type   SourceType
 	Name   string
 	Arn    string
-	Source *Source
+	Source *Identity
 }
 
-func NewConfig(ctx utils.Context, creds aws.Credentials, region string, src Source) (*Config, error) {
-	arnParts := strings.Split(src.Arn, ":")
-	if len(arnParts) != 6 {
-		return nil, fmt.Errorf("does not appear to be a valid targetArn: %s", src.Arn)
+func (i Identity) Account() string {
+	p := strings.Split(i.Arn, ":")
+
+	if len(p) < 5 {
+		panic(fmt.Sprintf("invalid Arn: %s", i.Arn))
+	} else if len(p[4]) != 12 {
+		panic(fmt.Sprintf("invalid account id: %s", p[4]))
 	}
 
-	c := &Config{
-		initalCreds: creds,
-		cfg: aws.Config{Region: region, Credentials: credentials.StaticCredentialsProvider{
-			Value: aws.Credentials{
-				AccessKeyID:     creds.AccessKeyID,
-				SecretAccessKey: creds.SecretAccessKey,
-				SessionToken:    creds.SessionToken,
-				Source:          src.Arn,
-			},
-		}},
-		source:  src,
-		ctx:     ctx,
-		account: arnParts[4],
+	return p[4]
+}
+
+func (i Identity) ResourceType() string {
+	return strings.Split(strings.Split(i.Arn, ":")[5], "/")[0]
+}
+
+// Id returns underlying role or user ARN for this principal.
+func (i Identity) Id() string {
+	result := strings.Replace(i.Arn, ":sts:", ":iam:", 1)
+
+	switch i.ResourceType() {
+	case "assumed-role":
+		result = strings.Replace(result, ":assumed-role/", ":role/", 1)
+		result = strings.Join(strings.Split(result, "/")[:2], "/")
+	default:
+		result = i.Arn
 	}
-	if c.AssumeRole == nil {
-		c.AssumeRole = sts.NewFromConfig(c.cfg).AssumeRole
+
+	return result
+}
+
+func (i *Identity) IdentityPath() (path []string) {
+	identity := i
+	for {
+		if identity == nil {
+			break
+		}
+
+		path = append(path, identity.Id())
+		identity = identity.Source
 	}
-	return c, nil
+	slices.Reverse(path)
+	return path
+}
+
+func (i Identity) IsRecursive() bool {
+	return utils.SliceRepeats(i.IdentityPath())
+}
+
+func NewConfig(ctx utils.Context, region string, src Identity) (*Config, error) {
+	awsCfg := aws.Config{Region: region}
+
+	return &Config{
+		Identity: src,
+		Config:   awsCfg,
+		ctx:      ctx,
+		Sts:      sts.NewFromConfig(awsCfg),
+	}, nil
 }
 
 // SetGraph needs to be called with the graph and initial creds before Config is used.
@@ -84,71 +117,45 @@ func NewConfig(ctx utils.Context, creds aws.Credentials, region string, src Sour
 // to the graph object).
 func (c *Config) SetGraph(g interface{}) {
 	c.graph = g.(*graph.Graph[*Config])
-	c.cfg.Credentials = c.CredProvider(c.initalCreds)
+	//c.cfg.Credentials = c.CredProvider(c.InitialCreds)
+}
+
+func (c *Config) SetProvider(p *aws.CredentialsCache) {
+	c.Credentials = p
 }
 
 type Config struct {
-	source Source
-	cfg    aws.Config
-	ctx    utils.Context
-	state  State
-
-	// A bit of a hack for mocking, imagine there is a better way to do this.
-	AssumeRole  func(ctx context.Context, params *sts.AssumeRoleInput, optFns ...func(*sts.Options)) (*sts.AssumeRoleOutput, error)
-	graph       *graph.Graph[*Config]
-	account     string
-	initalCreds aws.Credentials
-}
-
-func (c Config) Id() string {
-	return c.source.Arn
-}
-
-func (c *Config) State() State {
-	return c.state
-}
-
-func (c *Config) SetState(s State) {
-	c.state = s
-}
-
-func (c *Config) Config() aws.Config {
-	return c.cfg
+	Identity
+	aws.Config
+	ctx   utils.Context
+	Sts   stscreds.AssumeRoleAPIClient
+	graph *graph.Graph[*Config]
 }
 
 func (c *Config) Assume(ctx utils.Context, arn string) (*Config, error) {
-	resp, err := c.AssumeRole(ctx, &sts.AssumeRoleInput{
+	_, err := c.Sts.AssumeRole(ctx.Context, &sts.AssumeRoleInput{
 		RoleArn:         aws.String(arn),
 		RoleSessionName: aws.String("liquidswards"),
-		//DurationSeconds: aws.Int32(900), // TODO: Make this configurable
 	})
 	if err != nil {
 		return nil, fmt.Errorf("Assume(): %w", err)
 	}
 
-	creds := aws.Credentials{
-		AccessKeyID:     *resp.Credentials.AccessKeyId,
-		SecretAccessKey: *resp.Credentials.SecretAccessKey,
-		SessionToken:    *resp.Credentials.SessionToken,
-		Expires:         *resp.Credentials.Expiration,
-		CanExpire:       true,
-		Source:          c.Arn(),
-	}
-
-	src := Source{
+	newCfg, err := NewConfig(ctx, c.Region, Identity{
 		Type:   SourceAssumeRole,
-		Source: &c.source,
 		Name:   arn,
 		Arn:    arn,
+		Source: &c.Identity,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("Assume(): %w", err)
 	}
-	newCfg, err := NewConfig(ctx, creds, c.cfg.Region, src)
-	newCfg.SetGraph(c.graph)
-	return newCfg, err
-}
 
-// ID is used to implement graph.INode which returns the principal ARN.
-func (c *Config) ID() string {
-	return c.Arn()
+	c.graph.AddEdge(c, newCfg)
+	newCfg.SetProvider(NewGraphProvider(ctx, c.graph, arn))
+	newCfg.SetGraph(c.graph)
+
+	return newCfg, err
 }
 
 // Name returns the role/user name without the path.
@@ -158,43 +165,20 @@ func (c *Config) Name() string {
 }
 
 func (c *Config) Arn() string {
-	return c.source.Arn
+	return c.Identity.Arn
 }
 
-func (c *Config) Type() SourceType {
-	return c.source.Type
-}
+func (c *Config) Refresh(ctx utils.Context) (aws.Credentials, error) {
+	p := c.Credentials
 
-func (c *Config) Account() string {
-	return c.account
-}
-
-func (c *Config) Refresh(ctx utils.Context) (*Config, error) {
-	c.state = RefreshingState
-	if c.Type() == SourceProfile {
-		return c.RefreshProfile(ctx)
-	} else {
-		return c.RefreshRole(ctx)
+	switch p.(type) {
+	case *aws.CredentialsCache:
+		p.(*aws.CredentialsCache).Invalidate()
+	default:
+		ctx.Info.Printf("got provider type: %T", p)
 	}
-}
 
-// CredProvider uses the passed aws.Credentials if valid, otherwise credentials are refreshed from the graph.
-func (c *Config) CredProvider(creds aws.Credentials) aws.CredentialsProvider {
-	return aws.NewCredentialsCache(
-		aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-			if !creds.Expired() {
-				return creds, nil
-			}
-
-			cfg, err := c.Refresh(utils.NewContext(ctx))
-			if err != nil {
-				return aws.Credentials{}, err
-			}
-
-			creds, err := cfg.Config().Credentials.Retrieve(ctx)
-			return creds, err
-		}),
-	)
+	return p.Retrieve(ctx.Context)
 }
 
 type JsonConfig struct {
@@ -202,15 +186,15 @@ type JsonConfig struct {
 	State       State
 	Region      string
 	Credentials aws.Credentials
-	Source      Source
+	Identity    Identity
 }
 
 func (c *Config) MarshalJSON() ([]byte, error) {
 	var creds aws.Credentials
 	var err error
 
-	if c.cfg.Credentials != nil {
-		creds, err = c.cfg.Credentials.Retrieve(context.Background())
+	if c.Credentials != nil {
+		creds, err = c.Credentials.Retrieve(context.Background())
 		if err != nil {
 			return nil, fmt.Errorf("Save(): %w", err)
 		}
@@ -218,10 +202,9 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 
 	obj := JsonConfig{
 		Arn:         c.Arn(),
-		State:       c.state,
-		Region:      c.cfg.Region,
+		Region:      c.Region,
 		Credentials: creds,
-		Source:      c.source,
+		Identity:    c.Identity,
 	}
 	r, err := json.Marshal(obj)
 	return r, err
@@ -235,70 +218,22 @@ func (c *Config) UnmarshalJSON(bytes []byte) error {
 		return fmt.Errorf("unmarshalling: %w", err)
 	}
 
-	cfg, err := NewConfig(c.ctx, obj.Credentials, obj.Region, obj.Source)
+	cfg, err := NewConfig(c.ctx, obj.Region, obj.Identity)
 	if err != nil {
 		return fmt.Errorf("UnmarshalJSON(): %w", err)
 	}
+
+	cfg.Config.Credentials = aws.NewCredentialsCache(credentials.StaticCredentialsProvider{Value: obj.Credentials})
 
 	*c = *cfg
 	return nil
 }
 
-func (c *Config) RefreshRole(ctx utils.Context) (*Config, error) {
-	node, ok := c.graph.GetNode(c.Arn())
-	if !ok {
-		return nil, fmt.Errorf("unable to find node for %s", c.Arn())
-	}
-
-	var cfg *Config
-	for _, src := range node.Inbound() {
-		var err error
-		cfg, err = src.Value().Assume(ctx, c.Arn())
-		if err == nil {
-			break
-		}
-	}
-
-	if cfg == nil {
-		c.SetState(FailedState)
-		in := node.Inbound()
-		names := strings.Join(utils.Keys(in), ", ")
-		return nil, fmt.Errorf("unable to refresh credentials from: %s", names)
-	} else {
-		c.SetState(ActiveState)
-	}
-
-	return cfg, nil
-}
-
-func (c *Config) RefreshProfile(ctx utils.Context) (*Config, error) {
-	svc := iam.NewFromConfig(c.cfg)
-	key, err := svc.CreateAccessKey(ctx, &iam.CreateAccessKeyInput{
-		UserName: aws.String(c.source.Name),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("creating access key for %s: %w", c.source.Name, err)
-	}
-	c.cfg.Credentials = credentials.NewStaticCredentialsProvider(
-		*key.AccessKey.AccessKeyId,
-		*key.AccessKey.SecretAccessKey,
-		"",
-	)
-	ctx.Info.Printf("New credentials for %s: AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s", c.source.Name, *key.AccessKey.AccessKeyId, *key.AccessKey.SecretAccessKey)
-	return c, nil
-}
-
-func ParseProfiles(ctx utils.Context, profiles string, region string, g *graph.Graph[*Config]) ([]*Config, error) {
-	var ret []*Config
+func ParseProfiles(ctx utils.Context, profiles string, region string, g *graph.Graph[*Config]) (configs []*Config, err error) {
 	for _, p := range utils.SplitCommas(profiles) {
 		awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region), config.WithSharedConfigProfile(p))
 		if err != nil {
 			return nil, fmt.Errorf("loading profile %s using region %s: %w", p, region, err)
-		}
-
-		creds, err := awsCfg.Credentials.Retrieve(ctx)
-		if err != nil {
-			return ret, fmt.Errorf("ParseProfiles(): %w", err)
 		}
 
 		arn, err := utils.GetCallerArn(ctx, awsCfg)
@@ -306,15 +241,19 @@ func ParseProfiles(ctx utils.Context, profiles string, region string, g *graph.G
 			return nil, fmt.Errorf("failed to call sts:GetCallerArn using the %s profile: %w", p, err)
 		}
 
-		cfg, err := NewConfig(ctx, creds, region, Source{Type: SourceProfile, Name: p, Arn: arn})
+		cfg, err := NewConfig(ctx, region, Identity{Type: SourceProfile, Name: p, Arn: arn})
 		if err != nil {
 			return nil, fmt.Errorf("ParseProfiles(): %w", err)
 		}
+
+		cfg.SetProvider(awsCfg.Credentials.(*aws.CredentialsCache))
+
+		g.AddNode(cfg)
 		cfg.SetGraph(g)
 
-		ret = append(ret, cfg)
+		configs = append(configs, cfg)
 	}
-	return ret, nil
+	return configs, nil
 }
 
 // ParseScope returns the accounts included in the comma delimited scopeStr as well as any accounts passed in cfgs.
@@ -326,61 +265,51 @@ func ParseScope(scopeStr string, cfgs []*Config) []string {
 	return utils.FilterDuplicates(utils.RemoveDefaults(scope))
 }
 
+type MockSts struct {
+	Calls []sts.AssumeRoleInput
+}
+
+func (s *MockSts) AssumeRole(ctx context.Context, in *sts.AssumeRoleInput, optFns ...func(*sts.Options)) (*sts.AssumeRoleOutput, error) {
+	s.Calls = append(s.Calls, *in)
+
+	return &sts.AssumeRoleOutput{
+		AssumedRoleUser: &types.AssumedRoleUser{
+			Arn:           aws.String(fmt.Sprintf("%s-Arn", *in.RoleArn)),
+			AssumedRoleId: aws.String(fmt.Sprintf("%s-id", *in.RoleArn)),
+		},
+		Credentials: &types.Credentials{
+			AccessKeyId:     aws.String("test"),
+			SecretAccessKey: aws.String("test"),
+			SessionToken:    aws.String("test"),
+			Expiration:      aws.Time(time.Time{}),
+		},
+	}, nil
+}
+
 // NewTestAssumesAllConfig is kept here for now to allow using it from other modules.
-func NewTestAssumesAllConfig(srcType SourceType, name string, g *graph.Graph[*Config]) (*Config, error) {
-	src := Source{
+func NewTestAssumesAllConfig(srcType SourceType, name string, g *graph.Graph[*Config]) (*Config, *MockSts, error) {
+	src := Identity{
 		Type: srcType,
-		Name: fmt.Sprintf("arn:aws:iam::123456789012:%s", name),
+		Name: name,
 		Arn:  fmt.Sprintf("arn:aws:iam::123456789012:%s", name),
 	}
 
 	ctx := utils.NewContext(context.Background())
-	creds := aws.Credentials{AccessKeyID: "test", SecretAccessKey: "test", SessionToken: "test"}
-	cfg, err := NewConfig(ctx, creds, "us-east-1", src)
+	cfg, err := NewConfig(ctx, "us-east-1", src)
 	if err != nil {
-		return nil, fmt.Errorf("NewTestAssumesAllConfig(): %w", err)
+		return nil, nil, fmt.Errorf("NewTestAssumesAllConfig(): %w", err)
+	}
+
+	if srcType == SourceProfile {
+		creds := aws.Credentials{AccessKeyID: "test", SecretAccessKey: "test", SessionToken: "test", Source: src.Arn}
+		cfg.SetProvider(aws.NewCredentialsCache(credentials.StaticCredentialsProvider{Value: creds}))
+	} else {
+		cfg.SetProvider(NewGraphProvider(ctx, g, src.Arn))
 	}
 
 	cfg.SetGraph(g)
 
-	// TODO: Test SetGraph's credential provider.
-	// For now just override it with static creds.
-	cfg.cfg.Credentials = credentials.StaticCredentialsProvider{
-		Value: aws.Credentials{
-			AccessKeyID:     "test",
-			SecretAccessKey: "test",
-			SessionToken:    "test",
-			Source:          src.Arn,
-		},
-	}
-
-	cfg.AssumeRole = func(ctx context.Context, in *sts.AssumeRoleInput, optFns ...func(*sts.Options)) (*sts.AssumeRoleOutput, error) {
-		return &sts.AssumeRoleOutput{
-			AssumedRoleUser: &types.AssumedRoleUser{
-				Arn:           aws.String(fmt.Sprintf("%s-arn", *in.RoleArn)),
-				AssumedRoleId: aws.String(fmt.Sprintf("%s-id", *in.RoleArn)),
-			},
-			Credentials: &types.Credentials{
-				AccessKeyId:     aws.String("test"),
-				SecretAccessKey: aws.String("test"),
-				SessionToken:    aws.String("test"),
-				Expiration:      aws.Time(time.Now().Round(time.Hour * 24 * 30)),
-			},
-		}, nil
-	}
-	return cfg, nil
-}
-
-func (c *Config) IdentityPath() []string {
-	source := c.source
-	path := []string{c.Arn()}
-	for {
-		if source.Source == nil {
-			break
-		}
-
-		path = append([]string{source.Arn}, path...)
-		source = *source.Source
-	}
-	return path
+	client := &MockSts{Calls: []sts.AssumeRoleInput{}}
+	cfg.Sts = client
+	return cfg, client, nil
 }

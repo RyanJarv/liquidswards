@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"flag"
 	"fmt"
 	"github.com/RyanJarv/liquidswards/lib/creds"
 	"github.com/RyanJarv/liquidswards/lib/types"
@@ -14,8 +15,9 @@ import (
 	"time"
 )
 
-var cloudtrailEnabled = utils.PluginArgs.Bool("cloudtrail", false, `
-Search CloudTrail logs for sts:AssumeRole events. This can be used to discover roles that are assumed by other users.
+var cloudtrailHours = flag.Int("cloudtrail", 0, `
+Search through the last specified number of hours of CloudTrail logs for sts:AssumeRole events. This can be used to 
+discover roles that are assumed by other users.
 `)
 
 const MaxWorkers = 3
@@ -25,23 +27,26 @@ var roleArnRe = regexp.MustCompile(`arn:aws:iam::[0-9]{12}:(role|assumed-role)/[
 
 func NewCloudTrail(ctx utils.Context, args types.GlobalPluginArgs) types.Plugin {
 	pool := pond.New(MaxWorkers, MaxCapacity, pond.Strategy(pond.Lazy()))
+
 	return &CloudTrail{
-		enabled:          cloudtrailEnabled,
+		hours:            cloudtrailHours,
 		Context:          ctx,
 		GlobalPluginArgs: args,
 		Pool:             pool,
 		m:                &sync.RWMutex{},
+		WaitGroup:        &sync.WaitGroup{},
 		covered:          map[string]bool{},
 	}
 }
 
 type CloudTrail struct {
+	*sync.WaitGroup
 	utils.Context
 	types.GlobalPluginArgs
 	Pool    *pond.WorkerPool
 	m       *sync.RWMutex
 	covered map[string]bool
-	enabled *bool
+	hours   *int
 }
 
 func (a *CloudTrail) Name() string {
@@ -49,10 +54,10 @@ func (a *CloudTrail) Name() string {
 }
 
 func (a *CloudTrail) Enabled() (enabled bool, reason string) {
-	if *a.enabled {
-		return true, "will search cloudtrail for additional in-scope roles"
+	if *a.hours > 0 {
+		return true, fmt.Sprintf("searching the last %d hours of cloudtrail logs for additional in-scope roles", *a.hours)
 	} else {
-		return false, "pass the -cloudtrail flag to enable"
+		return false, "pass the number of hours to search with the -cloudtrail flag to enable"
 	}
 }
 
@@ -77,11 +82,14 @@ func (a *CloudTrail) run(ctx utils.Context, cfg *creds.Config) {
 		a.m.Unlock()
 	}
 
-	slices := utils.TimeSlices(24*time.Hour, 60)
+	hours := time.Duration(*cloudtrailHours)
+	slices := utils.TimeSlices(hours*time.Hour, 20)
 	for _, slice := range slices {
+		a.WaitGroup.Add(1)
 		a.Pool.Submit(func() {
 			utils.SetDebugLabels("plugins", "cloudtrail", "arn", cfg.Arn())
 			a.searchCloudTrail(ctx, cfg, slice.Start, slice.End)
+			a.WaitGroup.Done()
 		})
 	}
 }
@@ -95,7 +103,7 @@ func (a *CloudTrail) searchCloudTrail(ctx utils.Context, cfg *creds.Config, star
 			a.m.Unlock()
 		}
 	}()
-	svc := cloudtrail.NewFromConfig(cfg.Config())
+	svc := cloudtrail.NewFromConfig(cfg.Config)
 
 	paginator := cloudtrail.NewLookupEventsPaginator(svc, &cloudtrail.LookupEventsInput{
 		StartTime: &start,
@@ -109,7 +117,6 @@ func (a *CloudTrail) searchCloudTrail(ctx utils.Context, cfg *creds.Config, star
 	})
 
 	for paginator.HasMorePages() && ctx.IsRunning("finished searching cloudtrail, exiting...") {
-		fmt.Printf(".")
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
 			panic(err)
@@ -122,7 +129,7 @@ func (a *CloudTrail) searchCloudTrail(ctx utils.Context, cfg *creds.Config, star
 					continue
 				}
 				if a.FoundRoles.Add(types.NewRole(arn)) {
-					fmt.Printf("CloudTrail: Found role %s\n", arn)
+					ctx.Debug.Println("CloudTrail: Found role:", arn)
 				}
 			}
 		}

@@ -13,6 +13,10 @@ type Plugin interface {
 	Enabled() (enabled bool, reason string)
 }
 
+type Waitable interface {
+	Wait()
+}
+
 type GlobalPluginArgs struct {
 	Region           string
 	FoundRoles       *utils.Iterator[Role]
