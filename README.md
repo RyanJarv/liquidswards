@@ -59,24 +59,62 @@ This project requires go 1.18 or later.
 ## Help
 
 ```
+Main arguments:
+  -cloudtrail int
+    	
+    	Search through the last specified number of hours of CloudTrail logs for sts:AssumeRole events. This can be used to 
+    	discover roles that are assumed by other users.
+    	
   -debug
     	Enable debug output
+  -file string
+    	A file containing a list of additional file to enumerate.
   -load
     	Load results from previous scans.
   -name string
     	Name of environment, used to store and retrieve graphs. (default "default")
+  -no-assume
+    	do not attempt to assume discovered roles
+  -no-list
+    	disable the list plugin
   -no-save
     	Do not save scan results to disk.
-  -no-scan
-    	Do not attempt to assume file any file.
+  -no-scope
+    	
+    	Disable scope, all discovered role ARN's belonging to ANY account will be enumerated for access and additional file 
+    	recursively.
+    	
   -profiles string
-    	List of AWS profiles (seperated by commas)
+    	List of AWS profiles (seperated by commas) (default "default")
+  -refresh int
+    	
+    	The CredRefreshSeconds rate used for the access plugin in seconds. This defaults to once an hour, but if you want to bypass role 
+    	revocation without using cloudtrail events (-sqs-queue option, see the README for more info) you can set this to 
+    	approximately three seconds.
+    	
   -region string
     	The AWS Region to use (default "us-east-1")
   -scope string
-    	List of AWS account ID's (seperated by comma's) that are in scope. 
-    	Accounts associated with any profiles used are always in scope 
-    	regardless of this value.
+    	
+    	List of AWS account ID's (seperated by comma's) that are in scope. Accounts associated with any profiles used are 
+    	always in scope regardless of this value.
+    	
+  -sqs-queue string
+    	
+    	SQS queue which receives IAM updates via CloudTrail/CloudWatch/EventBridge. If set, -access-CredRefreshSeconds is not used and 
+    	access is only refreshed when the credentials are about to expire or access is revoked via the web console. 
+    	
+    	Currently, the first profile passed with -profiles is used to access the SQS queue. 
+    	
+    	TODO: Make the profile used to access the queue configurable.
+    	
+About liquidswards:
+
+	liquidswards discovers and enumerates access to IAM Roles via sts:SourceAssumeRole API call's. For each account associated with a profile passed on the command line it will discover roles via iam:ListRoles and searching CloudTrail for sts:SourceAssumeRole calls by other users. For each role discovered it will attempt to call sts:SourceAssumeRole on it from each fole the tool currently has access to, if the call succeeds the discovery and access enumeration steps are repeated from that Role. Inbound other words it attempts to recursively discover and enumerate all possible sts:SourceAssumeRole paths that exist from the profiles passed on the command line.
+
+	It purposefully avoids relying on IAM parsing extensively due to the complexity involved as well as the goal of discovering what is known to be possible rather then what we think is possible.
+
+	The tool maintains a graph which is persisted to disk of file that where accessed. This is stored in ~/.liquidswards/<name>/ based on the name passed to the -name argument. This can be used to sav and load different sessions. The graph is used internally to build a GraphViz .dot file at the end of the run which can be converted to an image of accessible file. A simplified version of this graph with some info removed is also outputed to the console as well.
 ```
 
 Discover roles across several profiles by calling iam:ListRoles. This will enumerate roles via iam:ListRoles using
