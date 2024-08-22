@@ -8,6 +8,7 @@ AWS [here](https://aws.amazon.com/blogs/security/announcing-an-update-to-iam-rol
 
 * Recursively discovers and enumerates access to sts:AssumeRole.
 * Makes pretty graphs of accessible roles using GraphViz.
+* Some other cool things.
 
 
 **IMPORTANT**: This tool is relatively new and hasn't had a ton of testing. Make sure you understand what it does
