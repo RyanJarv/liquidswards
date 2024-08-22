@@ -56,7 +56,7 @@ changelog:
 
 release:
   github:
-    owner: goreleaser
-    name: golang-cross-example
+    owner: ryanjarv
+    name: liquidswards
   prerelease: auto
   draft: false
