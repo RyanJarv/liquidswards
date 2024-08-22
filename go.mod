@@ -3,7 +3,6 @@ module github.com/RyanJarv/liquidswards
 go 1.22
 
 require (
-	github.com/RyanJarv/lq v0.0.0-20220205091533-22a9e80d3567
 	github.com/alitto/pond v1.7.0
 	github.com/aws/aws-sdk-go-v2 v1.13.0
 	github.com/aws/aws-sdk-go-v2/config v1.13.1
@@ -31,4 +30,5 @@ require (
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	golang.org/x/image v0.14.0 // indirect
+	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 )

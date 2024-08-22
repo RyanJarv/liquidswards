@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/aws-sdk-go-v2/service/sts/types"
-	"slices"
 	"strings"
 	"time"
 )
@@ -93,7 +92,8 @@ func (i *Identity) IdentityPath() (path []string) {
 		path = append(path, identity.Id())
 		identity = identity.Source
 	}
-	slices.Reverse(path)
+
+	utils.Reverse(path)
 	return path
 }
 
