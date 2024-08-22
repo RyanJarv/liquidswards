@@ -9,6 +9,7 @@ AWS [here](https://aws.amazon.com/blogs/security/announcing-an-update-to-iam-rol
 * Recursively discovers and enumerates access to sts:AssumeRole.
 * Makes pretty graphs of accessible roles using GraphViz.
 
+
 **IMPORTANT**: This tool is relatively new and hasn't had a ton of testing. Make sure you understand what it does
 before using it.
 
@@ -36,35 +37,27 @@ likely what you want if you need to discover escalation paths in your accounts.
 Currently, there are release binaries for:
 
 * Darwin -- x86_64 and amd64
-* Linux -- x86_64
-* Windows -- x86_64
+* Linux -- x86_64, amd64, and armhf
+* Windows -- x86_64 and amd64
 
 The following will install the binaries on Darwin and Linux:
 
 ```
 tag=$(curl -s https://api.github.com/repos/RyanJarv/liquidswards/releases/latest|jq -r '.tag_name'|tr -d 'v')
-curl -L "https://github.com/RyanJarv/liquidswards/releases/download/v${tag}/liquidswards_${tag}_$(uname -s)_$(uname -m).tar.gz" \
+curl -L "https://github.com/RyanJarv/liquidswards/releases/download/v${tag}/liquidswards_$(uname -s)_$(uname -m).tar.gz" \
     | tar -xvf - -C /usr/local/bin/ liquidswards
 ```
 
-## Build
 
-This project requires go 1.18 or later.
+## Getting Started
 
-```
-% go build -o liquidswards main.go
-% ./liquidswards -h
-```
+By default we only test for access to roles in the same account(s) as the profiles used with the -profiles argument and enumeration is done using iam:ListRoles.
 
-## Help
+You can optionally do a few other things as well like search CloudTrail for outbound roles, enumerate roles in a file, or attempt to maintain access through role-juggling either through occasionally refreshing or on revocation notifications through an SQS queue. These things are secondary though and have had less testing.
+
+### Arguments
 
 ```
-Main arguments:
-  -cloudtrail int
-    	
-    	Search through the last specified number of hours of CloudTrail logs for sts:AssumeRole events. This can be used to 
-    	discover roles that are assumed by other users.
-    	
   -debug
     	Enable debug output
   -file string
@@ -73,10 +66,6 @@ Main arguments:
     	Load results from previous scans.
   -name string
     	Name of environment, used to store and retrieve graphs. (default "default")
-  -no-assume
-    	do not attempt to assume discovered roles
-  -no-list
-    	disable the list plugin
   -no-save
     	Do not save scan results to disk.
   -no-scope
@@ -85,40 +74,48 @@ Main arguments:
     	recursively.
     	
   -profiles string
-    	List of AWS profiles (seperated by commas) (default "default")
-  -refresh int
-    	
-    	The CredRefreshSeconds rate used for the access plugin in seconds. This defaults to once an hour, but if you want to bypass role 
-    	revocation without using cloudtrail events (-sqs-queue option, see the README for more info) you can set this to 
-    	approximately three seconds.
-    	
+    	List of AWS profiles (seperated by commas) (default "default")    	
   -region string
     	The AWS Region to use (default "us-east-1")
   -scope string
     	
     	List of AWS account ID's (seperated by comma's) that are in scope. Accounts associated with any profiles used are 
     	always in scope regardless of this value.
+```
+
+### Plugins
+
+
+```
+  -cloudtrail int
     	
+    	Search through the last specified number of hours of CloudTrail logs for sts:AssumeRole events. This can be used to 
+    	discover roles that are assumed by other users.
+  -no-assume
+    	do not attempt to assume discovered roles
+  -no-list
+    	disable the list plugin
+  -refresh int
+    	
+    	The CredRefreshSeconds rate used for the access plugin in seconds. This defaults to once an hour, but if you want to bypass role 
+    	revocation without using cloudtrail events (-sqs-queue option, see the README for more info) you can set this to 
+    	approximately three seconds.
   -sqs-queue string
     	
     	SQS queue which receives IAM updates via CloudTrail/CloudWatch/EventBridge. If set, -access-CredRefreshSeconds is not used and 
     	access is only refreshed when the credentials are about to expire or access is revoked via the web console. 
     	
     	Currently, the first profile passed with -profiles is used to access the SQS queue. 
-    	
-    	TODO: Make the profile used to access the queue configurable.
 ```
 
 ### About
 
-	liquidswards discovers and enumerates access to IAM Roles via sts:SourceAssumeRole API call's. For each account associated with a profile passed on the command line it will discover roles via iam:ListRoles and searching CloudTrail (if the -cloudtrail argument is used) for sts:SourceAssumeRole calls by other users. For each discovered role sts:AssumeRole will be tested from all currently maintained access, if the call succeeds the discovery and access enumeration steps are repeated from that Role if necessary, and the role is added to the access pool. To summarize, it attempts to recursively discover and enumerate all possible sts:SourceAssumeRole paths that exist from the profiles passed on the command line.
+liquidswards discovers and enumerates access to IAM Roles via sts:SourceAssumeRole API call's. For each account associated with a profile passed on the command line it will discover roles via iam:ListRoles and searching CloudTrail (if the -cloudtrail argument is used) for sts:SourceAssumeRole calls by other users. For each discovered role sts:AssumeRole will be tested from all currently maintained access, if the call succeeds the discovery and access enumeration steps are repeated from that Role if necessary, and the role is added to the access pool. To summarize, it attempts to recursively discover and enumerate all possible sts:SourceAssumeRole paths that exist from the profiles passed on the command line.
 
-	We purposefully avoid relying on IAM parsing extensively due to the complexity involved as well as the goal of discovering what is known to be possible rather then what we think is possible.
+We purposefully avoid relying on IAM parsing extensively due to the complexity involved as well as the goal of discovering what is known to be possible rather then what we think is possible.
 
-	The tool maintains a graph which is persisted to disk of the roles that where accessed. This is stored in ~/.liquidswards/<name>/ where name is the argument passed by -name. This can be used to save and load different sessions.
+The tool maintains a graph which is persisted to disk of the roles that where accessed. This is stored in ~/.liquidswards/<name>/ where name is the argument passed by -name. This can be used to save and load different sessions.
 
-
-## Examples
 
 ### Enumerate all access available from a set of AWS profiles
 
@@ -130,10 +127,31 @@ liquidswards -profiles aws_profile_1,aws_profile_2
 
 ### Print credentials of a previously accessed role
 
+```sh
 export $(liquidswards arn:aws:iam::123456789012:role/test)
+```
+
+### Perform Role Juggling on discovered role's
+
+This refreshes access from the first available inbound neighbor role in the access graph every 60 seconds.
+
+```sh
+liquidswards -profiles aws_profile_1,aws_profile_2 -refresh 60
+```
 
 ### What's with the name?
 
 It's named after the best solo Wu-Tang album.
 
 <img width="400" alt="liquidswords" src="https://user-images.githubusercontent.com/4079939/150443336-621ff008-e3a4-48bd-b871-0bb6afc8716b.jpg">
+
+
+## Build
+
+This project requires go 1.18 or later.
+
+```
+% go build -o liquidswards main.go
+% ./liquidswards -h
+```
+
