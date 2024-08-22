@@ -21,18 +21,6 @@ before using it.
 
 https://user-images.githubusercontent.com/4079939/152632976-813343ff-f89d-46b3-80e9-20ee3e9bcff0.mov
 
-## Why?
-
-I wanted a way of mapping assume role paths without depending on IAM. Having studied the code of the several
-open-source tools for doing this and written my own, I know this is not easy; additionally, in some edge cases, it's
-also not possible. This tool started with a desire to have an alternative to [PMapper](https://github.com/nccgroup/PMapper)
-and [AWSpx](https://github.com/FSecureLABS/awspx) that does something similar (specifically for sts:AssumeRole) in the
-stupidest possible way. Altogether avoiding IAM parsing allows you to ditch a lot of complexity, have higher
-confidence in the results (because of reduced complexity, *not* because other tools are undependable), and may work in
-various cases that do not apply to different approaches. The original goal would probably be best thought of as a way
-to validate the results of other tools, *not a replacement*. Both PMapper and AWSpx are excellent tools, and they are
-likely what you want if you need to discover escalation paths in your accounts.
-
 ## Install
 
 Currently, there are release binaries for:
@@ -140,6 +128,18 @@ This refreshes access from the first available inbound neighbor role in the acce
 liquidswards -profiles aws_profile_1,aws_profile_2 -refresh 60
 ```
 
+## Why?
+
+I wanted a way of mapping assume role paths without depending on IAM. Having studied the code of the several
+open-source tools for doing this and written my own, I know this is not easy; additionally, in some edge cases, it's
+also not possible. This tool started with a desire to have an alternative to [PMapper](https://github.com/nccgroup/PMapper)
+and [AWSpx](https://github.com/FSecureLABS/awspx) that does something similar (specifically for sts:AssumeRole) in the
+stupidest possible way. Altogether avoiding IAM parsing allows you to ditch a lot of complexity, have higher
+confidence in the results (because of reduced complexity, *not* because other tools are undependable), and may work in
+various cases that do not apply to different approaches. The original goal would probably be best thought of as a way
+to validate the results of other tools, *not a replacement*. Both PMapper and AWSpx are excellent tools, and they are
+likely what you want if you need to discover escalation paths in your accounts.
+
 ### What's with the name?
 
 It's named after the best solo Wu-Tang album.
@@ -147,7 +147,9 @@ It's named after the best solo Wu-Tang album.
 <img width="400" alt="liquidswords" src="https://user-images.githubusercontent.com/4079939/150443336-621ff008-e3a4-48bd-b871-0bb6afc8716b.jpg">
 
 
-## Build
+## Development
+
+### Build
 
 This project requires go 1.18 or later.
 
@@ -155,4 +157,19 @@ This project requires go 1.18 or later.
 % go build -o liquidswards main.go
 % ./liquidswards -h
 ```
+
+### Tests
+
+Some tests work, some don't, just try to keep them working for now.
+
+### Plugins
+
+Most everything except for the graph is implemented through the [plugin interface](https://github.com/RyanJarv/liquidswards/blob/85b02d1fa0b0ade117a791ed1f0fb156646ac811/lib/types/types.go#L10).
+The [file](lib/plugins/file.go) plugin is the simplest so I'd copy that and add your plugin's new function [here](https://github.com/RyanJarv/liquidswards/blob/85b02d1fa0b0ade117a791ed1f0fb156646ac811/main.go#L57). Adding to, or acting on discovered roles is fairly straightforward, each plugin get's the global args struct which has a [FoundRoles](https://github.com/RyanJarv/liquidswards/blob/85b02d1fa0b0ade117a791ed1f0fb156646ac811/lib/types/types.go#L22) field, you can either add discovered role's through [Add](https://github.com/RyanJarv/liquidswards/blob/85b02d1fa0b0ade117a791ed1f0fb156646ac811/lib/plugins/file.go#L63) or iterate discovered role's using [Walk](https://github.com/RyanJarv/liquidswards/blob/85b02d1fa0b0ade117a791ed1f0fb156646ac811/lib/plugins/assume.go#L50). Any function passed to FoundRoles.Walk will recieve all previous and future discovered roles.
+
+Newly discovered access work's the same way using the [Access](https://github.com/RyanJarv/liquidswards/blob/85b02d1fa0b0ade117a791ed1f0fb156646ac811/lib/types/types.go#L23) field in the same global args structure. The only difference you add and recieve [Config](https://github.com/RyanJarv/liquidswards/blob/85b02d1fa0b0ade117a791ed1f0fb156646ac811/lib/creds/creds.go#L127) structs
+which can be used as an `aws.Config` and passed to any aws-sdk-go-v2 SDK. This creds.Config type also contains the graph of accessed nodes and a custom credential provider which refreshes from the nearest inbound neighbor.
+
+
+
 
