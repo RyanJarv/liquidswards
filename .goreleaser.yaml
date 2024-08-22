@@ -1,56 +1,62 @@
-# This is an example .goreleaser.yml file with some sensible defaults.
-# Make sure to check the documentation at https://goreleaser.com
-before:
-  hooks:
-    # You may remove this if you don't use go modules.
-    - go mod tidy
-    # you may remove this if you don't need go generate
-    - go generate ./...
 builds:
-  - id: darwin
-    env:
-      - CGO_ENABLED=1
-      - CC=o64-clang
-      - CXX=o64-clang++
+  - id: darwin-amd64
+    main: ./
+    binary: liquidswards
     goos:
       - darwin
     goarch:
       - amd64
-      - arm64
-  - id: linux
     env:
-      - CGO_ENABLED=1
+      - PKG_CONFIG_SYSROOT_DIR=/sysroot/macos/amd64
+      - PKG_CONFIG_PATH=/sysroot/macos/amd64/usr/local/lib/pkgconfig
+      - CC=o64-clang
+      - CXX=o64-clang++
+    flags:
+      - -mod=readonly
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+  - id: linux-armhf
+    main: ./
+    binary: liquidswards
     goos:
       - linux
-      # Not working atm:
-      # - arm64
     goarch:
-      - amd64
-  - id: windows
+      - arm
+    goarm:
+      - 7
     env:
-      - CGO_ENABLED=1
-      - CC=x86_64-w64-mingw32-gcc
-      - CXX=x86_64-w64-mingw32-g++ 
-    goos:
-      - windows
-    goarch:
-      - amd64
-      # Not working atm:
-      # - arm64
+      - CC=arm-linux-gnueabihf-gcc
+      - CXX=arm-linux-gnueabihf-g++
+      - CGO_CFLAGS=--sysroot=/sysroot/linux/armhf
+      - CGO_LDFLAGS=--sysroot=/sysroot/linux/armhf
+      - PKG_CONFIG_SYSROOT_DIR=/sysroot/linux/armhf
+      - PKG_CONFIG_PATH=/sysroot/linux/armhf/opt/vc/lib/pkgconfig:/sysroot/linux/armhf/usr/lib/arm-linux-gnueabihf/pkgconfig:/sysroot/linux/armhf/usr/lib/pkgconfig:/sysroot/linux/armhf/usr/local/lib/pkgconfig
+    flags:
+      - -mod=readonly
+    ldflags:
+      - -s -w -X main.version={{.Version}}
 archives:
-  - replacements:
-      darwin: Darwin
-      linux: Linux
-      windows: Windows
-      386: i386
-      amd64: x86_64
+  - id: golang-cross
+    builds:
+      - darwin-amd64
+      - linux-armhf
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: zip
+    wrap_in_directory: true
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  name_template: "{{ .Tag }}"
 changelog:
   sort: asc
   filters:
     exclude:
       - '^docs:'
       - '^test:'
+
+release:
+  github:
+    owner: goreleaser
+    name: golang-cross-example
+  prerelease: auto
+  draft: false
