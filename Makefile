@@ -14,7 +14,6 @@ sysroot-unpack:
 
 .PHONY: release
 release:
-	env && \
 	docker run \
 		--rm \
 		-e CGO_ENABLED=1 \
