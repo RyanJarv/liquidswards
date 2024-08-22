@@ -37,22 +37,20 @@ recursively.
 	debug       = flag.Bool("debug", false, "Enable debug output")
 
 	help = strings.Replace(`
-	liquidswards discovers and enumerates access to IAM Roles via sts:SourceAssumeRole API call's. \
-For each account associated with a profile passed on the command line it will discover roles via \
-iam:ListRoles and searching CloudTrail for sts:SourceAssumeRole calls by other users. For each \
-role discovered it will attempt to call sts:SourceAssumeRole on it from each fole the tool currently \
-has access to, if the call succeeds the discovery and access enumeration steps are repeated from that \
-Role. Inbound other words it attempts to recursively discover and enumerate all possible \
-sts:SourceAssumeRole paths that exist from the profiles passed on the command line.
+liquidswards discovers and enumerates access to IAM Roles via sts:SourceAssumeRole API call's. For each account \
+associated with a profile passed on the command line it will discover roles via iam:ListRoles and searching CloudTrail \
+(if the -cloudtrail argument is used) for sts:SourceAssumeRole calls by other users. For each discovered role \
+sts:AssumeRole will be tested from all currently maintained access, if the call succeeds the discovery and access \
+enumeration steps are repeated from that Role if necessary, and the role is added to the access pool. To summarize, \
+it attempts to recursively discover and enumerate all possible sts:SourceAssumeRole paths that exist from the profiles \
+passed on the command line.
 
-	It purposefully avoids relying on IAM parsing extensively due to the complexity involved as \
-well as the goal of discovering what is known to be possible rather then what we think is possible.
+We purposefully avoid relying on IAM parsing extensively due to the complexity involved as well as the goal of \
+discovering what is known to be possible rather then what we think is possible.
 
-	The tool maintains a graph which is persisted to disk of file that where accessed. This is stored in \
-~/.liquidswards/<name>/ based on the name passed to the -name argument. This can be used to sav and load \
-different sessions. The graph is used internally to build a GraphViz .dot file at the end of the run which \
-can be converted to an image of accessible file. A simplified version of this graph with some info removed \
-is also outputed to the console as well.
+The tool maintains a graph which is persisted to disk of the roles that where accessed. This is stored in \
+~/.liquidswards/<name>/ where name is the argument passed by -name. This can be used to save and load different \
+sessions.
 
 `, "\\\n", "", -1)
 
