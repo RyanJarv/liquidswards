@@ -7,10 +7,22 @@ builds:
     goarch:
       - amd64
     env:
-      - PKG_CONFIG_SYSROOT_DIR=/sysroot/macos/amd64
-      - PKG_CONFIG_PATH=/sysroot/macos/amd64/usr/local/lib/pkgconfig
       - CC=o64-clang
       - CXX=o64-clang++
+    flags:
+      - -mod=readonly
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+  - id: darwin-arm64
+    main: ./
+    binary: liquidswards
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    env:
+      - CC=oa64-clang
+      - CXX=oa64-clang++
     flags:
       - -mod=readonly
     ldflags:
@@ -27,26 +39,84 @@ builds:
     env:
       - CC=arm-linux-gnueabihf-gcc
       - CXX=arm-linux-gnueabihf-g++
-      - CGO_CFLAGS=--sysroot=/sysroot/linux/armhf
-      - CGO_LDFLAGS=--sysroot=/sysroot/linux/armhf
-      - PKG_CONFIG_SYSROOT_DIR=/sysroot/linux/armhf
-      - PKG_CONFIG_PATH=/sysroot/linux/armhf/opt/vc/lib/pkgconfig:/sysroot/linux/armhf/usr/lib/arm-linux-gnueabihf/pkgconfig:/sysroot/linux/armhf/usr/lib/pkgconfig:/sysroot/linux/armhf/usr/local/lib/pkgconfig
+    flags:
+      - -mod=readonly
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+  - id: linux-arm64
+    main: ./
+    binary: liquidswards
+    goos:
+      - linux
+    goarch:
+      - arm64
+    env:
+      - CC=aarch64-linux-gnu-gcc
+      - CXX=aarch64-linux-gnu-g++
+    flags:
+      - -mod=readonly
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+  - id: linux-amd64
+    main: ./
+    binary: liquidswards
+    goos:
+      - linux
+    goarch:
+      - amd64
+    env:
+      - CC=x86_64-linux-gnu-gcc
+      - CXX=x86_64-linux-gnu-g++
+    flags:
+      - -mod=readonly
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+  - id: windows-amd64
+    main: ./
+    binary: liquidswards
+    goos:
+      - windows
+    goarch:
+      - amd64
+    env:
+      - CC=x86_64-w64-mingw32-gcc
+      - CXX=x86_64-w64-mingw32-g++
+    flags:
+      - -mod=readonly
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+  - id: windows-arm64
+    main: ./
+    binary: liquidswards
+    goos:
+      - windows
+    goarch:
+      - arm64
+    env:
+      - CC=/llvm-mingw/bin/aarch64-w64-mingw32-gcc
+      - CXX=/llvm-mingw/bin/aarch64-w64-mingw32-g++
     flags:
       - -mod=readonly
     ldflags:
       - -s -w -X main.version={{.Version}}
 archives:
-  - id: golang-cross
-    builds:
-      - darwin-amd64
-      - linux-armhf
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format: zip
-    wrap_in_directory: true
+  - format: tar.gz
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        format: zip
 checksum:
   name_template: 'checksums.txt'
 snapshot:
-  name_template: "{{ .Tag }}"
+  name_template: "{{ incpatch .Version }}-next"
 changelog:
   sort: asc
   filters:
@@ -56,7 +126,7 @@ changelog:
 
 release:
   github:
-    owner: goreleaser
-    name: golang-cross-example
+    owner: ryanjarv
+    name: liquidswards
   prerelease: auto
   draft: false

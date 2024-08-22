@@ -1,5 +1,6 @@
 .idea
-.sw[a-z]
 .release-env
 
 dist/
+
+**/*.sw[a-z]
