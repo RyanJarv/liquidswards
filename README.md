@@ -151,7 +151,7 @@ It's named after the best solo Wu-Tang album.
 
 ### Build
 
-This project requires go 1.18 or later.
+This project requires go 1.22 or later.
 
 ```
 % go build -o liquidswards main.go
